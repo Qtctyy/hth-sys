@@ -64,6 +64,8 @@ h1 { font-size: 22px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
 
 label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 5px; }
 
+/* 16px minimum font-size on inputs is required or iOS Safari auto-zooms the
+   page in when the field is focused, which is what caused the "buggy" layout. */
 input, select, textarea {
   width: 100%;
   background: var(--panel-2);
@@ -117,6 +119,27 @@ button.link {
   cursor: pointer;
   padding: 0;
 }
+
+.day-chips { display: flex; gap: 6px; margin-top: 6px; }
+.day-chip {
+  flex: 1;
+  text-align: center;
+  padding: 9px 0;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.day-chip.active {
+  background: var(--amber);
+  color: #1a1200;
+  border-color: var(--amber);
+}
+.day-chip:active { transform: scale(0.92); }
 
 .tabs { display: flex; gap: 8px; margin: 18px 0 14px; }
 .tab {
