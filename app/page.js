@@ -21,7 +21,10 @@ const emptyForm = {
   amount: '',
   notes: '',
   agent: AGENTS[0],
+  days_of_week: [0, 1, 2, 3, 4, 5, 6],
 };
+
+const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -73,6 +76,14 @@ export default function HomePage() {
   const [error, setError] = useState('');
   const [copiedId, setCopiedId] = useState(null);
   const [filterAgent, setFilterAgent] = useState(AGENTS[0]);
+  const [tick, setTick] = useState(0);
+
+  // Re-checks the clock every 30s so sorting/"Up next" stays live while the app is open,
+  // instead of only updating when you tap something.
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -110,6 +121,15 @@ export default function HomePage() {
     setForm((f) => ({ ...f, [key]: value }));
   }
 
+  function toggleDay(idx) {
+    setForm((f) => {
+      const has = f.days_of_week.includes(idx);
+      if (has && f.days_of_week.length === 1) return f; // keep at least one day
+      const days = has ? f.days_of_week.filter((d) => d !== idx) : [...f.days_of_week, idx];
+      return { ...f, days_of_week: days };
+    });
+  }
+
   function resetForm() {
     setForm({ ...emptyForm, agent: filterAgent });
     setEditingId(null);
@@ -131,6 +151,7 @@ export default function HomePage() {
       amount: ride.amount ?? '',
       notes: ride.notes || '',
       agent: ride.agent || AGENTS[0],
+      days_of_week: ride.days_of_week && ride.days_of_week.length ? ride.days_of_week : [0, 1, 2, 3, 4, 5, 6],
     });
     setEditingId(ride.id);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -160,6 +181,7 @@ export default function HomePage() {
       way_back_time: form.way_back_enabled ? form.way_back_time : '',
       amount: parseFloat(form.amount) || 0,
       notes: form.notes.trim(),
+      days_of_week: form.days_of_week,
     };
 
     let saveError;
@@ -232,7 +254,12 @@ export default function HomePage() {
   const now = new Date();
   const dateLabel = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 
-  const filteredRides = rides.filter((r) => r.agent === filterAgent);
+  const todayIndex = now.getDay(); // 0=Sun...6=Sat, matches days_of_week
+  const filteredRides = rides.filter((r) => {
+    if (r.agent !== filterAgent) return false;
+    if (!r.days_of_week || r.days_of_week.length === 0) return true; // no restriction = every day
+    return r.days_of_week.includes(todayIndex);
+  });
   const sorted = [...filteredRides].sort((a, b) => {
     const [pa, ta] = sortKey(a, now, today);
     const [pb, tb] = sortKey(b, now, today);
@@ -329,6 +356,19 @@ export default function HomePage() {
         <select value={form.agent} onChange={(e) => updateField('agent', e.target.value)}>
           {AGENTS.map((a) => <option key={a} value={a}>{a}</option>)}
         </select>
+
+        <label>Which days does this ride happen?</label>
+        <div className="day-chips">
+          {DAY_LABELS.map((label, idx) => (
+            <div
+              key={idx}
+              className={`day-chip ${form.days_of_week.includes(idx) ? 'active' : ''}`}
+              onClick={() => toggleDay(idx)}
+            >
+              {label}
+            </div>
+          ))}
+        </div>
 
         <button className="primary" type="submit" disabled={saving}>
           {saving ? 'Saving...' : editingId ? 'Update ride' : 'Save ride'}
