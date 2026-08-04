@@ -120,6 +120,7 @@ button.link {
   padding: 0;
 }
 
+/* Agent filter tabs */
 .day-chips { display: flex; gap: 6px; margin-top: 6px; }
 .day-chip {
   flex: 1;
@@ -222,6 +223,8 @@ button.link {
 .switch input:checked + .track { background: var(--amber-dim); border-color: var(--amber); }
 .switch input:checked + .track::before { transform: translateX(18px); background: var(--amber); }
 
+.trip-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+
 .complete-btn {
   background: none; border: 1px solid var(--line); color: var(--muted);
   border-radius: 7px; padding: 7px 11px; font-size: 12px; cursor: pointer;
@@ -229,6 +232,15 @@ button.link {
 }
 .complete-btn:active { transform: scale(0.96); }
 .complete-btn.done { background: var(--green-dim); color: var(--green); border-color: var(--green); }
+
+.uber-btn {
+  background: #000; color: #fff; border: 1px solid #000;
+  border-radius: 7px; padding: 7px 11px; font-size: 12px; font-weight: 700; cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.uber-btn:active { transform: scale(0.96); }
+.uber-btn:disabled { opacity: 0.6; }
+.uber-btn-disabled { opacity: 0.5; cursor: default; }
 
 .entry-actions { display: flex; gap: 8px; margin-top: 12px; }
 .entry-actions button {
@@ -253,4 +265,84 @@ button.link {
 @keyframes pulseDot {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
+}
+
+.subtabs {
+  display: flex; gap: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  padding-bottom: 6px; margin-bottom: 16px;
+}
+.subtab {
+  flex: 0 0 auto;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.subtab.active { background: var(--amber); color: #1a1200; border-color: var(--amber); }
+.subtab:active { transform: scale(0.95); }
+
+.entry-dimmed { opacity: 0.55; }
+
+.copy-picker { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.copy-picker button {
+  background: var(--panel-2); border: 1px solid var(--amber); color: var(--amber);
+  border-radius: 7px; padding: 6px 10px; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.copy-picker button:active { transform: scale(0.95); }
+
+.day-chip.mini {
+  cursor: default;
+  padding: 6px 0;
+  font-size: 11px;
+}
+
+.quicklist-row {
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 8px; cursor: pointer;
+  animation: fadeSlideUp 0.3s ease both;
+  transition: border-color 0.15s;
+}
+.quicklist-row:active { border-color: var(--amber); }
+
+.history-row {
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 8px;
+  animation: fadeSlideUp 0.3s ease both;
+}
+
+.cal-nav {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 12px; font-weight: 700; font-size: 14px;
+}
+.cal-nav button {
+  background: var(--panel); border: 1px solid var(--line); color: var(--amber);
+  border-radius: 8px; width: 34px; height: 34px; font-size: 18px; cursor: pointer;
+}
+.cal-nav button:active { transform: scale(0.94); }
+
+.cal-grid {
+  display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin-bottom: 16px;
+}
+.cal-head { text-align: center; font-size: 11px; color: var(--muted); font-weight: 700; padding-bottom: 4px; }
+.cal-cell {
+  aspect-ratio: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  cursor: pointer; position: relative; transition: all 0.15s ease;
+}
+.cal-cell.empty-cell { background: transparent; border: none; cursor: default; }
+.cal-cell.today { border-color: var(--amber); }
+.cal-cell.selected { background: var(--amber-dim); border-color: var(--amber); }
+.cal-cell:active { transform: scale(0.94); }
+.cal-daynum { font-size: 12px; font-weight: 700; }
+.cal-count {
+  font-size: 9px; font-weight: 800; color: var(--amber); background: var(--panel-2);
+  border-radius: 999px; padding: 1px 5px; margin-top: 2px;
 }
