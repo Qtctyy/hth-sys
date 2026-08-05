@@ -384,24 +384,28 @@ export default function HomePage() {
     }
   }
 
-  async function resolveCoord(text) {
-    if (!text) return null;
-    if (isUrl(text)) return extractCoordsFromUrl(text);
-    return geocodeAddress(text);
+async function followShortMapLink(url) {
+  try {
+    const res = await fetch(url);
+    const finalUrl = res.url;
+    return extractCoordsFromUrl(finalUrl);
+  } catch (e) {
+    return null;
   }
+}
 
-  // Resolves a leg's Uber link in the background, well before the button is tapped.
-  // This is the fix: iOS will only open the Uber app (instead of falling back to the
-  // website) when the link is a real <a href> tapped directly — any lookup done
-  // *after* the tap breaks that trust and Safari loads the web page instead.
-  async function resolveUberUrl(ride, leg) {
-    const key = `${ride.id}-${leg}`;
-    if (resolvingUberRef.current.has(key) || uberUrls[key] !== undefined) return;
-    resolvingUberRef.current.add(key);
+async function resolveCoord(text) {
+  if (!text) return null;
+  if (isUrl(text)) {
+    // First try extracting coords directly (for full links with @lat,lng)
+    const direct = extractCoordsFromUrl(text);
+    if (direct) return direct;
+    // If no direct coords found, it's likely a short link — follow the redirect
+    return followShortMapLink(text);
+  }
+  return geocodeAddress(text);
+}
 
-    const pickupText = leg === 'to_work' ? ride.to_work_pickup : ride.way_back_pickup;
-    const destText = leg === 'to_work' ? ride.to_work_dest : ride.way_back_dest;
-    const [pickupCoord, destCoord] = await Promise.all([
       resolveCoord(pickupText),
       resolveCoord(destText),
     ]);
