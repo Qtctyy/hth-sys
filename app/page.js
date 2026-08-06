@@ -481,7 +481,7 @@ export default function HomePage() {
   }
 
   async function copyDriverMessage(ride) {
-    const msg = `الطلب ب اسم "${ride.name}"\nهي رقمه "${ride.mobile_number || ''}"`;
+    const msg = `الطلب ب اسم ${ride.name}\n\nهي الرقم ${ride.mobile_number || ''}`;
     try {
       await navigator.clipboard.writeText(msg);
       setDriverMsgCopiedId(ride.id);
@@ -525,6 +525,8 @@ export default function HomePage() {
     return ta - tb;
   });
   const total = todaysRides.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+  const toWorkCountToday = todaysRides.filter((r) => activeLegs(r).includes('to_work')).length;
+  const wayBackCountToday = todaysRides.filter((r) => activeLegs(r).includes('way_back')).length;
   const firstPendingId = sortedPending[0]?.id;
   const nextUpMinutes = sortedPending.length > 0 ? sortKey(sortedPending[0], now, businessDay)[1] : null;
 
@@ -561,6 +563,28 @@ export default function HomePage() {
             <span className={`chevron ${isExpanded ? 'open' : ''}`}>▾</span>
           </div>
         </div>
+
+        {!isExpanded && (
+          <div className="collapsed-summary">
+            {['to_work', 'way_back'].map((leg) => {
+              const info = legInfo(r, leg);
+              if (!info.enabled || !info.time) return null;
+              return (
+                <span key={leg} className={`mini-time ${leg === 'to_work' ? 'to-work' : 'way-back'} ${info.done ? 'done' : ''}`}>
+                  {leg === 'to_work' ? '🏢' : '🏠'} {fmtTime(info.time)}{info.done ? ' ✓' : ''}
+                </span>
+              );
+            })}
+            {r.mobile_number && (
+              <button
+                className="mini-copy-btn"
+                onClick={(e) => { e.stopPropagation(); copyNumber(r); }}
+              >
+                {copiedId === r.id ? 'Copied!' : '📋 ' + r.mobile_number}
+              </button>
+            )}
+          </div>
+        )}
 
         {isExpanded && (
           <>
@@ -800,6 +824,10 @@ export default function HomePage() {
             <h2>{filterAgent}'s rides today</h2>
             <div className="total-pill">${total.toFixed(2)}</div>
           </div>
+          <div className="stats-row">
+            <span className="stat-pill">🏢 {toWorkCountToday} to-work</span>
+            <span className="stat-pill">🏠 {wayBackCountToday} way-back</span>
+          </div>
 
           {loadingRides ? (
             <div className="loading">Loading...</div>
@@ -845,6 +873,28 @@ export default function HomePage() {
                       <span className={`chevron ${isExpanded ? 'open' : ''}`}>▾</span>
                     </div>
                   </div>
+
+                  {!isExpanded && (
+                    <div className="collapsed-summary">
+                      {['to_work', 'way_back'].map((leg) => {
+                        const info = legInfo(r, leg);
+                        if (!info.enabled || !info.time) return null;
+                        return (
+                          <span key={leg} className={`mini-time ${leg === 'to_work' ? 'to-work' : 'way-back'}`}>
+                            {leg === 'to_work' ? '🏢' : '🏠'} {fmtTime(info.time)}
+                          </span>
+                        );
+                      })}
+                      {r.mobile_number && (
+                        <button
+                          className="mini-copy-btn"
+                          onClick={(e) => { e.stopPropagation(); copyNumber(r); }}
+                        >
+                          {copiedId === r.id ? 'Copied!' : '📋 ' + r.mobile_number}
+                        </button>
+                      )}
+                    </div>
+                  )}
 
                   {isExpanded && (
                     <>
