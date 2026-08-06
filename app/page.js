@@ -118,6 +118,31 @@ function ridesScheduledOnWeekday(rides, weekdayIdx) {
   });
 }
 
+// Converts a locally-written number (e.g. 07XXXXXXXX) into the international
+// digits-only format WhatsApp's click-to-chat links require.
+function toWhatsappNumber(mobile) {
+  if (!mobile) return null;
+  let digits = mobile.replace(/\D/g, '');
+  if (!digits) return null;
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.startsWith('962')) return digits;
+  if (digits.startsWith('0')) return '962' + digits.slice(1);
+  return '962' + digits;
+}
+function waLink(mobile) {
+  const num = toWhatsappNumber(mobile);
+  return num ? `https://wa.me/${num}` : null;
+}
+
+function formatCountdown(mins) {
+  if (mins == null || !isFinite(mins)) return '';
+  if (mins < 1) return 'now';
+  const h = Math.floor(mins / 60);
+  const m = Math.round(mins % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m} min`;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [session, setSession] = useState(undefined);
@@ -141,6 +166,8 @@ export default function HomePage() {
     const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d;
   });
   const [selectedWeekday, setSelectedWeekday] = useState(null);
+  const [expandedIds, setExpandedIds] = useState(new Set());
+  const [driverMsgCopiedId, setDriverMsgCopiedId] = useState(null);
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 30000);
@@ -384,28 +411,40 @@ export default function HomePage() {
     }
   }
 
-async function followShortMapLink(url) {
-  try {
-    const res = await fetch(url);
-    const finalUrl = res.url;
-    return extractCoordsFromUrl(finalUrl);
-  } catch (e) {
-    return null;
+  async function followShortMapLink(url) {
+    try {
+      const res = await fetch(url);
+      const finalUrl = res.url;
+      return extractCoordsFromUrl(finalUrl);
+    } catch (e) {
+      return null;
+    }
   }
-}
 
-async function resolveCoord(text) {
-  if (!text) return null;
-  if (isUrl(text)) {
-    // First try extracting coords directly (for full links with @lat,lng)
-    const direct = extractCoordsFromUrl(text);
-    if (direct) return direct;
-    // If no direct coords found, it's likely a short link — follow the redirect
-    return followShortMapLink(text);
+  async function resolveCoord(text) {
+    if (!text) return null;
+    if (isUrl(text)) {
+      // First try extracting coords directly (for full links with @lat,lng)
+      const direct = extractCoordsFromUrl(text);
+      if (direct) return direct;
+      // If no direct coords found, it's likely a short link — follow the redirect
+      return followShortMapLink(text);
+    }
+    return geocodeAddress(text);
   }
-  return geocodeAddress(text);
-}
 
+  // Resolves a leg's Uber link in the background, well before the button is tapped.
+  // This is the fix: iOS will only open the Uber app (instead of falling back to the
+  // website) when the link is a real <a href> tapped directly — any lookup done
+  // *after* the tap breaks that trust and Safari loads the web page instead.
+  async function resolveUberUrl(ride, leg) {
+    const key = `${ride.id}-${leg}`;
+    if (resolvingUberRef.current.has(key) || uberUrls[key] !== undefined) return;
+    resolvingUberRef.current.add(key);
+
+    const pickupText = leg === 'to_work' ? ride.to_work_pickup : ride.way_back_pickup;
+    const destText = leg === 'to_work' ? ride.to_work_dest : ride.way_back_dest;
+    const [pickupCoord, destCoord] = await Promise.all([
       resolveCoord(pickupText),
       resolveCoord(destText),
     ]);
@@ -427,6 +466,26 @@ async function resolveCoord(text) {
       await navigator.clipboard.writeText(ride.mobile_number);
       setCopiedId(ride.id);
       setTimeout(() => setCopiedId(null), 1500);
+    } catch (e) {
+      // Clipboard API unavailable — fail silently.
+    }
+  }
+
+  function toggleExpand(id) {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function copyDriverMessage(ride) {
+    const msg = `الطلب ب اسم "${ride.name}"\nهي رقمه "${ride.mobile_number || ''}"`;
+    try {
+      await navigator.clipboard.writeText(msg);
+      setDriverMsgCopiedId(ride.id);
+      setTimeout(() => setDriverMsgCopiedId(null), 1500);
     } catch (e) {
       // Clipboard API unavailable — fail silently.
     }
@@ -467,6 +526,7 @@ async function resolveCoord(text) {
   });
   const total = todaysRides.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
   const firstPendingId = sortedPending[0]?.id;
+  const nextUpMinutes = sortedPending.length > 0 ? sortKey(sortedPending[0], now, businessDay)[1] : null;
 
   const quickList = [...agentRides].sort((a, b) => a.name.localeCompare(b.name));
 
@@ -484,100 +544,120 @@ async function resolveCoord(text) {
 
   function renderRideCard(r, opts = {}) {
     const isNextUp = opts.isNextUp;
+    const isExpanded = expandedIds.has(r.id);
+    const wa = waLink(r.mobile_number);
     return (
       <div className={`entry ${isNextUp ? 'next-up' : ''} ${opts.dimmed ? 'entry-dimmed' : ''}`} key={r.id}>
         {isNextUp && (
-          <div className="next-up-tag"><span className="pulse-dot"></span> Up next</div>
+          <div className="next-up-tag">
+            <span className="pulse-dot"></span> Up next
+            {opts.nextUpMinutes != null && ` · in ${formatCountdown(opts.nextUpMinutes)}`}
+          </div>
         )}
-        <div className="entry-top">
+        <div className="entry-top entry-top-clickable" onClick={() => toggleExpand(r.id)}>
           <div className="entry-name">{r.name}</div>
-          <div className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</div>
+          <div className="entry-top-right">
+            <div className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</div>
+            <span className={`chevron ${isExpanded ? 'open' : ''}`}>▾</span>
+          </div>
         </div>
 
-        {(r.building_number || r.street_name) && (
-          <div className="notes" style={{ fontStyle: 'normal' }}>
-            {[r.building_number, r.street_name].filter(Boolean).join(' - ')}
-          </div>
-        )}
-
-        {r.mobile_number && (
-          <div className="copy-row">
-            <span>{r.mobile_number}</span>
-            <button className="copy-btn" onClick={() => copyNumber(r)}>
-              {copiedId === r.id ? 'Copied!' : 'Copy'}
-            </button>
-          </div>
-        )}
-
-        {['to_work', 'way_back'].map((leg) => {
-          const info = legInfo(r, leg);
-          if (!info.enabled || !info.time) return null;
-          const tagClass = leg === 'to_work' ? 'to-work' : 'way-back';
-          const tagLabel = leg === 'to_work' ? 'To work' : 'Way back';
-          return (
-            <div key={leg}>
-              <div className="trip-line">
-                <span className={`trip-tag ${tagClass}`}>{tagLabel}</span>
-                <span className="trip-time">{fmtTime(info.time)}</span>
-                <span>{renderLocation(info.pickup)} → {renderLocation(info.dest)}</span>
+        {isExpanded && (
+          <>
+            {(r.building_number || r.street_name) && (
+              <div className="notes" style={{ fontStyle: 'normal' }}>
+                {[r.building_number, r.street_name].filter(Boolean).join(' - ')}
               </div>
-              {!opts.dimmed && (
-                <div className="trip-actions">
-                  <button
-                    className={`complete-btn ${info.done ? 'done' : ''}`}
-                    onClick={() => toggleComplete(r, leg)}
-                  >
-                    {info.done ? '✓ Completed' : `Mark ${leg === 'to_work' ? 'to-work' : 'way-back'} complete`}
-                  </button>
-                  {canUber(info.pickup) && canUber(info.dest) && (() => {
-                    const uKey = `${r.id}-${leg}`;
-                    const url = uberUrls[uKey];
-                    if (url) {
-                      return <a className="uber-btn" href={url}>🚕 Open in Uber</a>;
-                    }
-                    if (url === null) {
-                      return <span className="uber-btn uber-btn-disabled">Address not found</span>;
-                    }
-                    return <span className="uber-btn uber-btn-disabled">Locating...</span>;
-                  })()}
-                </div>
-              )}
-            </div>
-          );
-        })}
+            )}
 
-        {opts.dimmed && (
-          <div className="trip-actions">
+            {r.mobile_number && (
+              <div className="copy-row">
+                <span>{r.mobile_number}</span>
+                <button className="copy-btn" onClick={() => copyNumber(r)}>
+                  {copiedId === r.id ? 'Copied!' : 'Copy'}
+                </button>
+                {wa && (
+                  <a className="wa-btn" href={wa} target="_blank" rel="noopener noreferrer">
+                    WhatsApp
+                  </a>
+                )}
+              </div>
+            )}
+
             {['to_work', 'way_back'].map((leg) => {
               const info = legInfo(r, leg);
               if (!info.enabled || !info.time) return null;
+              const tagClass = leg === 'to_work' ? 'to-work' : 'way-back';
+              const tagLabel = leg === 'to_work' ? 'To work' : 'Way back';
               return (
-                <button
-                  key={leg}
-                  className="complete-btn done"
-                  onClick={() => toggleComplete(r, leg)}
-                >
-                  ✓ {leg === 'to_work' ? 'To-work' : 'Way-back'} done — undo
-                </button>
+                <div key={leg}>
+                  <div className="trip-line">
+                    <span className={`trip-tag ${tagClass}`}>{tagLabel}</span>
+                    <span className="trip-time">{fmtTime(info.time)}</span>
+                    <span>{renderLocation(info.pickup)} → {renderLocation(info.dest)}</span>
+                  </div>
+                  {!opts.dimmed && (
+                    <div className="trip-actions">
+                      <button
+                        className={`complete-btn ${info.done ? 'done' : ''}`}
+                        onClick={() => toggleComplete(r, leg)}
+                      >
+                        {info.done ? '✓ Completed' : `Mark ${leg === 'to_work' ? 'to-work' : 'way-back'} complete`}
+                      </button>
+                      {canUber(info.pickup) && canUber(info.dest) && (() => {
+                        const uKey = `${r.id}-${leg}`;
+                        const url = uberUrls[uKey];
+                        if (url) {
+                          return <a className="uber-btn" href={url}>🚕 Open in Uber</a>;
+                        }
+                        if (url === null) {
+                          return <span className="uber-btn uber-btn-disabled">Address not found</span>;
+                        }
+                        return <span className="uber-btn uber-btn-disabled">Locating...</span>;
+                      })()}
+                    </div>
+                  )}
+                </div>
               );
             })}
-          </div>
-        )}
 
-        {r.notes && <div className="notes">{r.notes}</div>}
+            {opts.dimmed && (
+              <div className="trip-actions">
+                {['to_work', 'way_back'].map((leg) => {
+                  const info = legInfo(r, leg);
+                  if (!info.enabled || !info.time) return null;
+                  return (
+                    <button
+                      key={leg}
+                      className="complete-btn done"
+                      onClick={() => toggleComplete(r, leg)}
+                    >
+                      ✓ {leg === 'to_work' ? 'To-work' : 'Way-back'} done — undo
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
-        <div className="entry-actions">
-          <button onClick={() => startEdit(r)}>Edit</button>
-          <button onClick={() => handleDelete(r.id)}>Delete</button>
-          <button onClick={() => setCopyOpenId(copyOpenId === r.id ? null : r.id)}>Copy to...</button>
-        </div>
+            {r.notes && <div className="notes">{r.notes}</div>}
 
-        {copyOpenId === r.id && (
-          <div className="copy-picker">
-            {AGENTS.filter((a) => a !== r.agent).map((a) => (
-              <button key={a} onClick={() => copyToAgent(r, a)}>{a}</button>
-            ))}
-          </div>
+            <div className="entry-actions">
+              <button onClick={() => startEdit(r)}>Edit</button>
+              <button onClick={() => handleDelete(r.id)}>Delete</button>
+              <button onClick={() => setCopyOpenId(copyOpenId === r.id ? null : r.id)}>Copy to...</button>
+              <button onClick={() => copyDriverMessage(r)}>
+                {driverMsgCopiedId === r.id ? 'Copied!' : 'Driver message'}
+              </button>
+            </div>
+
+            {copyOpenId === r.id && (
+              <div className="copy-picker">
+                {AGENTS.filter((a) => a !== r.agent).map((a) => (
+                  <button key={a} onClick={() => copyToAgent(r, a)}>{a}</button>
+                ))}
+              </div>
+            )}
+          </>
         )}
       </div>
     );
@@ -726,7 +806,10 @@ async function resolveCoord(text) {
           ) : sortedPending.length === 0 ? (
             <div className="empty">Nothing left today for {filterAgent}.</div>
           ) : (
-            sortedPending.map((r) => renderRideCard(r, { isNextUp: r.id === firstPendingId }))
+            sortedPending.map((r) => renderRideCard(r, {
+              isNextUp: r.id === firstPendingId,
+              nextUpMinutes: r.id === firstPendingId ? nextUpMinutes : null,
+            }))
           )}
 
           {completedToday.length > 0 && (
@@ -750,33 +833,63 @@ async function resolveCoord(text) {
           {agentRides.length === 0 ? (
             <div className="empty">No customers yet for {filterAgent}.</div>
           ) : (
-            agentRides.map((r) => (
-              <div className="entry" key={r.id}>
-                <div className="entry-top">
-                  <div className="entry-name">{r.name}</div>
-                  <div className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</div>
-                </div>
-                <div className="day-chips" style={{ marginTop: 10 }}>
-                  {DAY_LABELS.map((label, idx) => (
-                    <div key={idx} className={`day-chip mini ${(!r.days_of_week || r.days_of_week.length === 0 || r.days_of_week.includes(idx)) ? 'active' : ''}`}>
-                      {label}
+            agentRides.map((r) => {
+              const isExpanded = expandedIds.has(r.id);
+              const wa = waLink(r.mobile_number);
+              return (
+                <div className="entry" key={r.id}>
+                  <div className="entry-top entry-top-clickable" onClick={() => toggleExpand(r.id)}>
+                    <div className="entry-name">{r.name}</div>
+                    <div className="entry-top-right">
+                      <div className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</div>
+                      <span className={`chevron ${isExpanded ? 'open' : ''}`}>▾</span>
                     </div>
-                  ))}
-                </div>
-                <div className="entry-actions">
-                  <button onClick={() => startEdit(r)}>Edit</button>
-                  <button onClick={() => handleDelete(r.id)}>Delete</button>
-                  <button onClick={() => setCopyOpenId(copyOpenId === r.id ? null : r.id)}>Copy to...</button>
-                </div>
-                {copyOpenId === r.id && (
-                  <div className="copy-picker">
-                    {AGENTS.filter((a) => a !== r.agent).map((a) => (
-                      <button key={a} onClick={() => copyToAgent(r, a)}>{a}</button>
-                    ))}
                   </div>
-                )}
-              </div>
-            ))
+
+                  {isExpanded && (
+                    <>
+                      <div className="day-chips" style={{ marginTop: 10 }}>
+                        {DAY_LABELS.map((label, idx) => (
+                          <div key={idx} className={`day-chip mini ${(!r.days_of_week || r.days_of_week.length === 0 || r.days_of_week.includes(idx)) ? 'active' : ''}`}>
+                            {label}
+                          </div>
+                        ))}
+                      </div>
+
+                      {r.mobile_number && (
+                        <div className="copy-row">
+                          <span>{r.mobile_number}</span>
+                          <button className="copy-btn" onClick={() => copyNumber(r)}>
+                            {copiedId === r.id ? 'Copied!' : 'Copy'}
+                          </button>
+                          {wa && (
+                            <a className="wa-btn" href={wa} target="_blank" rel="noopener noreferrer">
+                              WhatsApp
+                            </a>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="entry-actions">
+                        <button onClick={() => startEdit(r)}>Edit</button>
+                        <button onClick={() => handleDelete(r.id)}>Delete</button>
+                        <button onClick={() => setCopyOpenId(copyOpenId === r.id ? null : r.id)}>Copy to...</button>
+                        <button onClick={() => copyDriverMessage(r)}>
+                          {driverMsgCopiedId === r.id ? 'Copied!' : 'Driver message'}
+                        </button>
+                      </div>
+                      {copyOpenId === r.id && (
+                        <div className="copy-picker">
+                          {AGENTS.filter((a) => a !== r.agent).map((a) => (
+                            <button key={a} onClick={() => copyToAgent(r, a)}>{a}</button>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              );
+            })
           )}
         </>
       )}
