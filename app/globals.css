@@ -120,7 +120,6 @@ button.link {
   padding: 0;
 }
 
-/* Agent filter tabs */
 .day-chips { display: flex; gap: 6px; margin-top: 6px; }
 .day-chip {
   flex: 1;
@@ -346,3 +345,20 @@ button.link {
   font-size: 9px; font-weight: 800; color: var(--amber); background: var(--panel-2);
   border-radius: 999px; padding: 1px 5px; margin-top: 2px;
 }
+
+.entry-top-clickable { cursor: pointer; }
+.entry-top-right { display: flex; align-items: center; gap: 8px; }
+.chevron {
+  color: var(--muted); font-size: 12px; transition: transform 0.15s ease;
+  display: inline-block;
+}
+.chevron.open { transform: rotate(180deg); color: var(--amber); }
+
+.wa-btn {
+  background: #25D366; color: #06280f; border: 1px solid #25D366;
+  border-radius: 7px; padding: 4px 9px; font-size: 11px; font-weight: 700;
+  text-decoration: none; transition: transform 0.1s ease;
+}
+.wa-btn:active { transform: scale(0.94); }
+
+.copy-row { flex-wrap: wrap; }
