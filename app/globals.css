@@ -1,32 +1,3 @@
-Let me build these one at a time.
-
-First, the driver message template:
-
-Now let's add the collapsed-view summary (times + quick copy for the number) and the today's leg counts. First, `renderRideCard`:
-
-Now the same for the **Customers view** (it has its own inline card markup, not `renderRideCard`):
-
-Now the today's to-work/way-back counts. Let's find where `total` is computed and where the Today list-header renders:
-
-Now let's verify everything and test the driver message template:
-
-Now the CSS for the new pieces (collapsed summary row, mini time badges, quick-copy button, stats row):
-
-All verified. Here's the recap and what to expect:
-
-- **Driver message** now copies exactly:
-```
-الطلب ب اسم [name]
-
-هي الرقم [number]
-```
-- **Number stays copyable** even when collapsed — a small 📋 button with the number sits right in the collapsed row now, no need to expand
-- **Collapsed cards** show each leg's time (🏢 for to-work, 🏠 for way-back), with a strikethrough + ✓ if already completed
-- **Today's counts** — a new row under the total shows "🏢 X to-work · 🏠 Y way-back" for the day
-
-**Replace `app/globals.css`:**
-
-```css
 :root {
   --bg: #14161a;
   --panel: #1d2026;
@@ -415,6 +386,3 @@ button.link {
   background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
   padding: 5px 12px; font-size: 12px; font-weight: 700; color: var(--text);
 }
-```
-
-Commit that, say "Next" and I'll send `app/page.js` (in 2 parts again).
