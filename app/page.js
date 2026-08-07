@@ -7,8 +7,8 @@ import { supabase } from '../lib/supabaseClient';
 const AGENTS = ['Hamzah', 'Hemam', 'Talal'];
 const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const VIEWS = ['today', 'customers', 'quicklist', 'calendar', 'history'];
-const VIEW_LABELS = { today: 'Today', customers: 'Customers', quicklist: 'Quick list', calendar: 'Calendar', history: 'History' };
+const VIEWS = ['today', 'overview', 'customers', 'quicklist', 'calendar', 'history', 'payments'];
+const VIEW_LABELS = { today: 'Today', overview: 'Overview', customers: 'Customers', quicklist: 'Quick list', calendar: 'Calendar', history: 'History', payments: 'Payments' };
 
 const emptyForm = {
   name: '',
@@ -83,6 +83,21 @@ function minutesUntil(t, now) {
   return mins;
 }
 
+// How many minutes ago a scheduled leg time passed, respecting the same 3am
+// business-day rollover as businessDayStr — a 9pm ride is still "today" and can
+// still go overdue at 1am, it doesn't silently reset just because the calendar date ticked over.
+function minutesOverdue(t, now) {
+  const [h, m] = t.split(':').map(Number);
+  const scheduled = new Date(now);
+  if (scheduled.getHours() < 3) scheduled.setDate(scheduled.getDate() - 1);
+  scheduled.setHours(h, m, 0, 0);
+  return (now - scheduled) / 60000;
+}
+function isOverdue(t, now) {
+  if (!t) return false;
+  return minutesOverdue(t, now) > 10;
+}
+
 function activeLegs(ride) {
   const legs = [];
   if (ride.to_work_enabled !== false && ride.to_work_time) legs.push('to_work');
@@ -97,6 +112,20 @@ function isFullyComplete(ride, businessDay) {
     const field = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
     return ride[field] === businessDay;
   });
+}
+
+// A ride skipped for today doesn't touch days_of_week at all — it's a one-day-only
+// flag that stops mattering by itself once the business day moves on, since it's
+// compared against today's date string rather than being cleared by any cleanup job.
+function isSkippedToday(ride, businessDay) {
+  return ride.skipped_date === businessDay;
+}
+
+function anyLegDoneToday(ride, businessDay) {
+  return (
+    ride.to_work_completed_date === businessDay ||
+    ride.way_back_completed_date === businessDay
+  );
 }
 
 function sortKey(ride, now, businessDay) {
@@ -143,6 +172,19 @@ function formatCountdown(mins) {
   return `${m} min`;
 }
 
+function startOfWeek(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  x.setDate(x.getDate() - x.getDay());
+  return x;
+}
+function startOfMonth(d) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  x.setDate(1);
+  return x;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const [session, setSession] = useState(undefined);
@@ -168,6 +210,10 @@ export default function HomePage() {
   const [selectedWeekday, setSelectedWeekday] = useState(null);
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [driverMsgCopiedId, setDriverMsgCopiedId] = useState(null);
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [payments, setPayments] = useState([]);
+  const [loadingPayments, setLoadingPayments] = useState(false);
+  const [toast, setToast] = useState('');
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 30000);
@@ -234,6 +280,55 @@ export default function HomePage() {
   useEffect(() => {
     if (session && view === 'history') loadHistory();
   }, [session, view, filterAgent, loadHistory]);
+
+  const loadPayments = useCallback(async () => {
+    if (!session) return;
+    setLoadingPayments(true);
+    const { data, error } = await supabase
+      .from('trip_history')
+      .select('*')
+      .eq('agent', filterAgent)
+      .order('completed_at', { ascending: false })
+      .limit(1000);
+    if (error) setError(error.message);
+    else setPayments(data || []);
+    setLoadingPayments(false);
+  }, [session, filterAgent]);
+
+  useEffect(() => {
+    if (session && view === 'payments') loadPayments();
+  }, [session, view, filterAgent, loadPayments]);
+
+  function showToast(msg) {
+    setToast(msg);
+    setTimeout(() => setToast((t) => (t === msg ? '' : t)), 2200);
+  }
+
+  async function markAllSettled(unsettledIds, totalAmount) {
+    if (unsettledIds.length === 0) return;
+    const { error } = await supabase.from('trip_history').update({ settled: true }).in('id', unsettledIds);
+    if (error) {
+      setError(error.message);
+      return;
+    }
+    showToast(`Marked $${totalAmount.toFixed(2)} as settled`);
+    loadPayments();
+  }
+
+  async function toggleSkipToday(ride) {
+    const bDay = businessDayStr(new Date());
+    const isSkipped = ride.skipped_date === bDay;
+    const { error } = await supabase
+      .from('rides')
+      .update({ skipped_date: isSkipped ? null : bDay })
+      .eq('id', ride.id);
+    if (error) {
+      setError(error.message);
+      return;
+    }
+    showToast(isSkipped ? `${ride.name} is back on schedule` : `${ride.name} skipped for today only`);
+    loadRides();
+  }
 
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -329,6 +424,7 @@ export default function HomePage() {
       setError(saveError.message);
       return;
     }
+    showToast(editingId ? 'Ride updated' : 'Ride saved');
     setFilterAgent(form.agent);
     resetForm();
     loadRides();
@@ -338,7 +434,10 @@ export default function HomePage() {
     if (!confirm('Delete this ride?')) return;
     const { error } = await supabase.from('rides').delete().eq('id', id);
     if (error) setError(error.message);
-    else loadRides();
+    else {
+      showToast('Ride deleted');
+      loadRides();
+    }
   }
 
   async function toggleComplete(ride, leg) {
@@ -359,23 +458,29 @@ export default function HomePage() {
       await supabase.from('trip_history').delete()
         .eq('ride_id', ride.id).eq('leg', leg).eq('business_day', bDay);
     } else {
+      // Split the ride's daily amount evenly across its active legs so history/payments
+      // totals add up to the ride's actual daily amount instead of double-counting it
+      // when both to-work and way-back are completed on the same day.
+      const legCount = activeLegs(ride).length || 1;
+      const legAmount = Math.round(((parseFloat(ride.amount) || 0) / legCount) * 100) / 100;
       await supabase.from('trip_history').insert({
         user_id: session.user.id,
         ride_id: ride.id,
         agent: ride.agent,
         customer_name: ride.name,
         leg,
-        amount: ride.amount || 0,
+        amount: legAmount,
         business_day: bDay,
       });
     }
     loadRides();
     if (view === 'history') loadHistory();
+    if (view === 'payments') loadPayments();
   }
 
   async function copyToAgent(ride, targetAgent) {
     const {
-      id, user_id, created_at, to_work_completed_date, way_back_completed_date,
+      id, user_id, created_at, to_work_completed_date, way_back_completed_date, skipped_date,
       ...rest
     } = ride;
     const payload = {
@@ -388,6 +493,7 @@ export default function HomePage() {
     const { error } = await supabase.from('rides').insert(payload);
     if (error) setError(error.message);
     else {
+      showToast(`Copied to ${targetAgent}`);
       setCopyOpenId(null);
       loadRides();
     }
@@ -491,6 +597,28 @@ export default function HomePage() {
     }
   }
 
+  function exportHistoryCsv() {
+    const rows = [['Customer', 'Leg', 'Amount', 'Completed at']];
+    history.forEach((h) => {
+      rows.push([
+        h.customer_name,
+        h.leg === 'to_work' ? 'To work' : 'Way back',
+        (parseFloat(h.amount) || 0).toFixed(2),
+        new Date(h.completed_at).toLocaleString(),
+      ]);
+    });
+    const csv = rows
+      .map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${filterAgent}-history-${businessDayStr(new Date())}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function renderLocation(value) {
     if (!value) return null;
     if (isUrl(value)) {
@@ -515,8 +643,10 @@ export default function HomePage() {
 
   const agentRides = rides.filter((r) => r.agent === filterAgent);
   const todaysRides = ridesScheduledOnWeekday(agentRides, todayWeekday);
-  const pendingToday = todaysRides.filter((r) => !isFullyComplete(r, businessDay));
-  const completedToday = todaysRides.filter((r) => isFullyComplete(r, businessDay));
+  const skippedToday = todaysRides.filter((r) => isSkippedToday(r, businessDay));
+  const activeTodayRides = todaysRides.filter((r) => !isSkippedToday(r, businessDay));
+  const pendingToday = activeTodayRides.filter((r) => !isFullyComplete(r, businessDay));
+  const completedToday = activeTodayRides.filter((r) => isFullyComplete(r, businessDay));
 
   const sortedPending = [...pendingToday].sort((a, b) => {
     const [pa, ta] = sortKey(a, now, businessDay);
@@ -524,13 +654,62 @@ export default function HomePage() {
     if (pa !== pb) return pa - pb;
     return ta - tb;
   });
-  const total = todaysRides.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
-  const toWorkCountToday = todaysRides.filter((r) => activeLegs(r).includes('to_work')).length;
-  const wayBackCountToday = todaysRides.filter((r) => activeLegs(r).includes('way_back')).length;
+  const total = activeTodayRides.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+  const toWorkCountToday = activeTodayRides.filter((r) => activeLegs(r).includes('to_work')).length;
+  const wayBackCountToday = activeTodayRides.filter((r) => activeLegs(r).includes('way_back')).length;
   const firstPendingId = sortedPending[0]?.id;
   const nextUpMinutes = sortedPending.length > 0 ? sortKey(sortedPending[0], now, businessDay)[1] : null;
 
+  // Legs done vs total, for the progress bar — only counts rides actually active today.
+  let totalLegsToday = 0;
+  let doneLegsToday = 0;
+  activeTodayRides.forEach((r) => {
+    activeLegs(r).forEach((leg) => {
+      totalLegsToday++;
+      const field = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
+      if (r[field] === businessDay) doneLegsToday++;
+    });
+  });
+  const progressPct = totalLegsToday === 0 ? 0 : Math.round((doneLegsToday / totalLegsToday) * 100);
+
   const quickList = [...agentRides].sort((a, b) => a.name.localeCompare(b.name));
+
+  const searchedAgentRides = customerSearch.trim()
+    ? agentRides.filter((r) => {
+        const q = customerSearch.trim().toLowerCase();
+        return r.name.toLowerCase().includes(q) || (r.mobile_number || '').includes(q);
+      })
+    : agentRides;
+
+  // All-agents snapshot for the Overview tab — so you don't have to flip through
+  // each agent's tab just to see how the whole team's day is going.
+  const overviewStats = AGENTS.map((a) => {
+    const aRides = rides.filter((r) => r.agent === a);
+    const aToday = ridesScheduledOnWeekday(aRides, todayWeekday).filter((r) => !isSkippedToday(r, businessDay));
+    const aPending = aToday.filter((r) => !isFullyComplete(r, businessDay));
+    const aTotal = aToday.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+    return {
+      agent: a,
+      customerCount: aRides.length,
+      todayCount: aToday.length,
+      pendingCount: aPending.length,
+      totalToday: aTotal,
+    };
+  });
+  const grandTotalToday = overviewStats.reduce((s, o) => s + o.totalToday, 0);
+  const grandPendingToday = overviewStats.reduce((s, o) => s + o.pendingCount, 0);
+
+  // Payments tab aggregates, computed client-side from the loaded history rows.
+  const weekStart = startOfWeek(now);
+  const monthStart = startOfMonth(now);
+  const weekTotal = payments
+    .filter((p) => new Date(p.completed_at) >= weekStart)
+    .reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const monthTotal = payments
+    .filter((p) => new Date(p.completed_at) >= monthStart)
+    .reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
+  const unsettledPayments = payments.filter((p) => !p.settled);
+  const unsettledTotal = unsettledPayments.reduce((s, p) => s + (parseFloat(p.amount) || 0), 0);
 
   const daysInCalMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate();
   const firstWeekday = calendarMonth.getDay();
@@ -569,9 +748,10 @@ export default function HomePage() {
             {['to_work', 'way_back'].map((leg) => {
               const info = legInfo(r, leg);
               if (!info.enabled || !info.time) return null;
+              const overdue = !opts.dimmed && !info.done && isOverdue(info.time, now);
               return (
-                <span key={leg} className={`mini-time ${leg === 'to_work' ? 'to-work' : 'way-back'} ${info.done ? 'done' : ''}`}>
-                  {leg === 'to_work' ? '🏢' : '🏠'} {fmtTime(info.time)}{info.done ? ' ✓' : ''}
+                <span key={leg} className={`mini-time ${leg === 'to_work' ? 'to-work' : 'way-back'} ${info.done ? 'done' : ''} ${overdue ? 'overdue' : ''}`}>
+                  {leg === 'to_work' ? '🏢' : '🏠'} {fmtTime(info.time)}{info.done ? ' ✓' : overdue ? ' ⚠' : ''}
                 </span>
               );
             })}
@@ -613,12 +793,14 @@ export default function HomePage() {
               if (!info.enabled || !info.time) return null;
               const tagClass = leg === 'to_work' ? 'to-work' : 'way-back';
               const tagLabel = leg === 'to_work' ? 'To work' : 'Way back';
+              const overdue = !opts.dimmed && !info.done && isOverdue(info.time, now);
               return (
                 <div key={leg}>
                   <div className="trip-line">
                     <span className={`trip-tag ${tagClass}`}>{tagLabel}</span>
-                    <span className="trip-time">{fmtTime(info.time)}</span>
+                    <span className={`trip-time ${overdue ? 'overdue' : ''}`}>{fmtTime(info.time)}</span>
                     <span>{renderLocation(info.pickup)} → {renderLocation(info.dest)}</span>
+                    {overdue && <span className="overdue-tag">Overdue</span>}
                   </div>
                   {!opts.dimmed && (
                     <div className="trip-actions">
@@ -672,6 +854,9 @@ export default function HomePage() {
               <button onClick={() => copyDriverMessage(r)}>
                 {driverMsgCopiedId === r.id ? 'Copied!' : 'Driver message'}
               </button>
+              {!opts.dimmed && !anyLegDoneToday(r, businessDay) && (
+                <button onClick={() => toggleSkipToday(r)}>Skip today</button>
+              )}
             </div>
 
             {copyOpenId === r.id && (
@@ -804,7 +989,7 @@ export default function HomePage() {
 
       <div className="tabs">
         {AGENTS.map((a) => (
-          <div key={a} className={`tab ${filterAgent === a ? 'active' : ''}`} onClick={() => setFilterAgent(a)}>
+          <div key={a} className={`tab ${filterAgent === a ? 'active' : ''}`} onClick={() => { setFilterAgent(a); setCustomerSearch(''); }}>
             {a}
           </div>
         ))}
@@ -827,7 +1012,21 @@ export default function HomePage() {
           <div className="stats-row">
             <span className="stat-pill">🏢 {toWorkCountToday} to-work</span>
             <span className="stat-pill">🏠 {wayBackCountToday} way-back</span>
+            {skippedToday.length > 0 && (
+              <span className="stat-pill">⏭ {skippedToday.length} skipped</span>
+            )}
           </div>
+
+          {totalLegsToday > 0 && (
+            <div className="progress-wrap">
+              <div className="progress-track">
+                <div className="progress-fill" style={{ width: `${progressPct}%` }}></div>
+              </div>
+              <div className="progress-label">
+                {progressPct === 100 ? `🎉 All ${totalLegsToday} legs done for today` : `${doneLegsToday}/${totalLegsToday} legs done · ${progressPct}%`}
+              </div>
+            </div>
+          )}
 
           {loadingRides ? (
             <div className="loading">Loading...</div>
@@ -849,6 +1048,60 @@ export default function HomePage() {
               {completedToday.map((r) => renderRideCard(r, { dimmed: true }))}
             </>
           )}
+
+          {skippedToday.length > 0 && (
+            <>
+              <div className="list-header">
+                <h2>Skipped today</h2>
+                <div className="total-pill">{skippedToday.length}</div>
+              </div>
+              {skippedToday.map((r) => (
+                <div className="entry entry-skipped" key={r.id}>
+                  <div className="entry-top">
+                    <div className="entry-name">{r.name}</div>
+                    <div className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</div>
+                  </div>
+                  <div className="sub" style={{ marginTop: 4 }}>Skipped for today only — schedule is unaffected.</div>
+                  <div className="entry-actions">
+                    <button onClick={() => toggleSkipToday(r)}>Unskip</button>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </>
+      )}
+
+      {view === 'overview' && (
+        <>
+          <div className="list-header">
+            <h2>Whole team, today</h2>
+            <div className="total-pill">${grandTotalToday.toFixed(2)}</div>
+          </div>
+          <div className="stats-row">
+            <span className="stat-pill">🕐 {grandPendingToday} pending</span>
+            <span className="stat-pill">👥 {overviewStats.reduce((s, o) => s + o.customerCount, 0)} customers</span>
+          </div>
+          {overviewStats.map((o) => (
+            <div
+              className="overview-card"
+              key={o.agent}
+              onClick={() => { setFilterAgent(o.agent); setView('today'); }}
+            >
+              <div className="overview-card-top">
+                <span className="overview-agent">{o.agent}</span>
+                <span className="entry-amount">${o.totalToday.toFixed(2)}</span>
+              </div>
+              <div className="overview-card-sub">
+                {o.todayCount === 0
+                  ? 'Nothing scheduled today'
+                  : o.pendingCount === 0
+                    ? `All ${o.todayCount} done for today ✓`
+                    : `${o.pendingCount} of ${o.todayCount} still pending`}
+                {' · '}{o.customerCount} total customers
+              </div>
+            </div>
+          ))}
         </>
       )}
 
@@ -856,12 +1109,20 @@ export default function HomePage() {
         <>
           <div className="list-header">
             <h2>{filterAgent}'s customers</h2>
-            <div className="total-pill">{agentRides.length}</div>
+            <div className="total-pill">{searchedAgentRides.length}</div>
           </div>
+          <input
+            className="search-input"
+            placeholder="Search by name or mobile number"
+            value={customerSearch}
+            onChange={(e) => setCustomerSearch(e.target.value)}
+          />
           {agentRides.length === 0 ? (
             <div className="empty">No customers yet for {filterAgent}.</div>
+          ) : searchedAgentRides.length === 0 ? (
+            <div className="empty">No customers match "{customerSearch}".</div>
           ) : (
-            agentRides.map((r) => {
+            searchedAgentRides.map((r) => {
               const isExpanded = expandedIds.has(r.id);
               const wa = waLink(r.mobile_number);
               return (
@@ -1018,6 +1279,9 @@ export default function HomePage() {
         <>
           <div className="list-header">
             <h2>{filterAgent}'s history</h2>
+            {history.length > 0 && (
+              <button className="link" onClick={exportHistoryCsv}>Export CSV</button>
+            )}
           </div>
           {loadingHistory ? (
             <div className="loading">Loading...</div>
@@ -1038,6 +1302,65 @@ export default function HomePage() {
           )}
         </>
       )}
+
+      {view === 'payments' && (
+        <>
+          <div className="list-header">
+            <h2>{filterAgent}'s payments</h2>
+          </div>
+          <div className="stats-row">
+            <span className="stat-pill">This week ${weekTotal.toFixed(2)}</span>
+            <span className="stat-pill">This month ${monthTotal.toFixed(2)}</span>
+          </div>
+
+          <div className="card payments-summary">
+            <div className="overview-card-top">
+              <span>Unsettled cash</span>
+              <span className="entry-amount">${unsettledTotal.toFixed(2)}</span>
+            </div>
+            <div className="overview-card-sub">
+              {unsettledPayments.length === 0
+                ? 'Everything collected so far has been settled.'
+                : `${unsettledPayments.length} completed trip${unsettledPayments.length === 1 ? '' : 's'} not yet settled up.`}
+            </div>
+            {unsettledPayments.length > 0 && (
+              <button
+                className="primary"
+                style={{ marginTop: 12 }}
+                onClick={() => markAllSettled(unsettledPayments.map((p) => p.id), unsettledTotal)}
+              >
+                Mark ${unsettledTotal.toFixed(2)} as settled
+              </button>
+            )}
+          </div>
+
+          <div className="list-header">
+            <h2>Recent trips</h2>
+          </div>
+          {loadingPayments ? (
+            <div className="loading">Loading...</div>
+          ) : payments.length === 0 ? (
+            <div className="empty">No completed trips logged yet.</div>
+          ) : (
+            payments.slice(0, 50).map((p) => (
+              <div className="history-row" key={p.id}>
+                <div>
+                  <div className="entry-name">{p.customer_name}</div>
+                  <div className="sub" style={{ marginTop: 2 }}>
+                    {p.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(p.completed_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div className="entry-amount">${(parseFloat(p.amount) || 0).toFixed(2)}</div>
+                  {!p.settled && <span className="unsettled-dot" title="Not settled yet"></span>}
+                </div>
+              </div>
+            ))
+          )}
+        </>
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }
