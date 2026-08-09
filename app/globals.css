@@ -120,6 +120,7 @@ button.link {
   padding: 0;
 }
 
+/* Agent filter tabs */
 .day-chips { display: flex; gap: 6px; margin-top: 6px; }
 .day-chip {
   flex: 1;
@@ -385,4 +386,92 @@ button.link {
 .stat-pill {
   background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
   padding: 5px 12px; font-size: 12px; font-weight: 700; color: var(--text);
+}
+
+.search-box { margin-bottom: 14px; }
+
+.call-btn {
+  background: var(--panel-2); border: 1px solid var(--amber); color: var(--amber);
+  border-radius: 7px; padding: 4px 9px; font-size: 11px; font-weight: 700;
+  text-decoration: none; transition: transform 0.1s ease;
+}
+.call-btn:active { transform: scale(0.94); }
+
+.next-up-tag.overdue { color: var(--coral); }
+.next-up-tag.overdue .pulse-dot { background: var(--coral); animation: pulseDot 0.8s ease-in-out infinite; }
+.entry.overdue { border-color: var(--coral); box-shadow: 0 0 0 1px var(--coral); }
+
+.earnings-total {
+  font-size: 40px; font-weight: 800; color: var(--amber);
+  text-align: center; margin: 24px 0 16px;
+}
+
+.history-day-group { margin-bottom: 18px; }
+.history-day-header {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted); margin-bottom: 8px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.history-day-header span:last-child { color: var(--amber); }
+
+.paid-toggle-on { background: var(--green-dim) !important; color: var(--green) !important; border-color: var(--green) !important; }
+
+.paused-tag {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  background: var(--coral-dim); color: var(--coral); border-radius: 5px;
+  padding: 2px 6px; margin-left: 8px; vertical-align: middle;
+}
+
+.complete-form {
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 10px; margin-top: 8px; display: flex; flex-wrap: wrap; gap: 8px;
+}
+.complete-form input {
+  flex: 1; min-width: 90px;
+}
+.complete-form-actions { display: flex; gap: 8px; width: 100%; }
+.complete-form-confirm {
+  flex: 1; background: var(--green); color: #06280f; border: none;
+  border-radius: 8px; padding: 10px; font-size: 14px; font-weight: 700; cursor: pointer;
+}
+.complete-form-confirm:active { transform: scale(0.97); }
+.complete-form-cancel {
+  background: none; border: 1px solid var(--line); color: var(--muted);
+  border-radius: 8px; padding: 10px 14px; font-size: 13px; cursor: pointer;
+}
+
+.history-row-wrap { margin-bottom: 10px; }
+.history-row-wrap .history-row { margin-bottom: 0; border-radius: 10px 10px 0 0; }
+.history-amounts {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  background: var(--panel-2); border: 1px solid var(--line); border-top: none;
+  border-radius: 0 0 10px 10px; padding: 8px 12px; font-size: 11px; color: var(--muted);
+}
+.history-amounts button {
+  margin-left: auto; background: none; border: 1px solid var(--line); color: var(--amber);
+  border-radius: 6px; padding: 4px 9px; font-size: 11px; font-weight: 700; cursor: pointer;
+}
+.history-amounts button.needs-amounts { border-color: var(--coral); color: var(--coral); }
+
+.filter-banner {
+  display: flex; justify-content: space-between; align-items: center;
+  background: var(--amber-dim); border: 1px solid var(--amber); border-radius: 10px;
+  padding: 10px 12px; margin-bottom: 14px; font-size: 13px;
+}
+.filter-banner button {
+  background: none; border: 1px solid var(--amber); color: var(--amber);
+  border-radius: 7px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+
+.tab.team-tab { background: var(--panel-2); }
+.tab.team-tab.active { background: var(--amber); }
+
+.phase-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px; margin-bottom: 12px;
+}
+.phase-header {
+  display: flex; justify-content: space-between; align-items: center;
+  font-weight: 700; font-size: 14px; margin-bottom: 10px;
 }
