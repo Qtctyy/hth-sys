@@ -438,7 +438,10 @@ button.link {
   color: var(--muted); margin-bottom: 8px; padding-bottom: 6px;
   border-bottom: 1px solid var(--line);
 }
-.history-day-header span:last-child { color: var(--amber); }
+.history-day-header span:last-child { color: var(--amber); display: flex; align-items: center; }
+.history-day-header-clickable { cursor: pointer; }
+.history-day-header-clickable:active { opacity: 0.8; }
+.history-count { color: var(--muted); font-weight: 600; text-transform: none; letter-spacing: normal; }
 
 .paid-toggle-on { background: var(--green-dim) !important; color: var(--green) !important; border-color: var(--green) !important; }
 
@@ -500,3 +503,19 @@ button.link {
   display: flex; justify-content: space-between; align-items: center;
   font-weight: 700; font-size: 14px; margin-bottom: 10px;
 }
+
+.customer-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
+}
+.customer-box {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px; cursor: pointer; transition: all 0.15s ease;
+  animation: fadeSlideUp 0.3s ease both;
+}
+.customer-box:active { transform: scale(0.96); border-color: var(--amber); }
+.customer-box-name {
+  font-weight: 700; font-size: 14px; margin-bottom: 8px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.customer-box-total { font-size: 20px; font-weight: 800; color: var(--amber); }
+.customer-box-count { font-size: 11px; color: var(--muted); margin-top: 4px; }
