@@ -1,12 +1,16 @@
 :root {
-  --bg: #14161a;
-  --panel: #1d2026;
-  --panel-2: #23262d;
-  --line: #2e323a;
-  --text: #eef0f3;
-  --muted: #9aa0ab;
-  --amber: #f2b705;
-  --amber-dim: #6b5406;
+  /* "Night dispatch" palette — ink-navy instead of flat black, and a warm
+     copper glow (like a taxi rooftop light at night) instead of flat amber.
+     Variable names kept as --amber/--amber-dim to avoid touching every place
+     that references them, but the actual color is now a warmer copper-orange. */
+  --bg: #0b0d14;
+  --panel: #151824;
+  --panel-2: #1c2030;
+  --line: #2b3040;
+  --text: #f1f3f8;
+  --muted: #9099ab;
+  --amber: #ff8a4c;
+  --amber-dim: #4a2a14;
   --green: #3fb27f;
   --green-dim: #16382a;
   --coral: #ef6461;
@@ -35,6 +39,18 @@ body {
   max-width: 640px;
   margin: 0 auto;
   padding: max(20px, env(safe-area-inset-top)) 16px calc(60px + env(safe-area-inset-bottom));
+  position: relative;
+}
+
+/* Signature touch: a soft glowing bar at the very top, like a taxi light. */
+.wrap::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 16px; right: 16px;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--amber), transparent);
+  opacity: 0.6;
+  filter: blur(0.5px);
 }
 
 .eyebrow {
@@ -97,8 +113,8 @@ button { font-family: inherit; }
 
 button.primary {
   width: 100%;
-  background: var(--amber);
-  color: #1a1200;
+  background: linear-gradient(135deg, #ffab6e, var(--amber));
+  color: #2a1204;
   border: none;
   border-radius: 10px;
   padding: 14px;
@@ -107,9 +123,10 @@ button.primary {
   margin-top: 16px;
   cursor: pointer;
   transition: transform 0.1s ease;
+  box-shadow: 0 4px 16px -4px rgba(255, 138, 76, 0.4);
 }
 button.primary:active { transform: scale(0.97); }
-button.primary:disabled { opacity: 0.5; }
+button.primary:disabled { opacity: 0.5; box-shadow: none; }
 
 button.link {
   background: none;
@@ -224,6 +241,9 @@ button.link {
 .switch input:checked + .track::before { transform: translateX(18px); background: var(--amber); }
 
 .trip-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.dimmed-legs { margin-top: 8px; }
+.dimmed-leg-block { margin-bottom: 8px; }
+.dimmed-leg-block .history-amounts { margin-top: 6px; }
 
 .complete-btn {
   background: none; border: 1px solid var(--line); color: var(--muted);
@@ -287,7 +307,9 @@ button.link {
 .subtab.active { background: var(--amber); color: #1a1200; border-color: var(--amber); }
 .subtab:active { transform: scale(0.95); }
 
-.entry-dimmed { opacity: 0.55; }
+.entry-dimmed { background: var(--panel-2); }
+.entry-dimmed .entry-name, .entry-dimmed .entry-amount { color: var(--muted); }
+.entry-dimmed .entry-top-clickable { cursor: default; }
 
 .copy-picker { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .copy-picker button {
@@ -404,6 +426,9 @@ button.link {
 .earnings-total {
   font-size: 40px; font-weight: 800; color: var(--amber);
   text-align: center; margin: 24px 0 16px;
+  padding: 20px 0;
+  background: radial-gradient(ellipse at center, rgba(255, 138, 76, 0.1), transparent 70%);
+  border-radius: 20px;
 }
 
 .history-day-group { margin-bottom: 18px; }
