@@ -128,7 +128,13 @@ function groupHistoryByCustomer(history) {
     if (!groups[name]) groups[name] = [];
     groups[name].push(h);
   });
-  return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0]));
+  // history arrives ordered by completed_at desc, so each group's first entry
+  // is already its most recent — sort customers by that, most recent first.
+  return Object.entries(groups).sort((a, b) => {
+    const aLatest = new Date(a[1][0].completed_at).getTime();
+    const bLatest = new Date(b[1][0].completed_at).getTime();
+    return bLatest - aLatest;
+  });
 }
 
 // Buckets an hour into the 3 requested shifts. Anything from 1am-6am (outside
@@ -239,6 +245,7 @@ export default function HomePage() {
   const [editingHistoryId, setEditingHistoryId] = useState(null);
   const [historyEditInputs, setHistoryEditInputs] = useState({ ride_cost: '', tip: '', money_out: '', cost: '' });
   const [historyFilterRide, setHistoryFilterRide] = useState(null);
+  const [selectedHistoryCustomer, setSelectedHistoryCustomer] = useState(null);
   const [teamStats, setTeamStats] = useState([]);
   const [loadingTeamStats, setLoadingTeamStats] = useState(false);
   const [todaysHistory, setTodaysHistory] = useState([]);
@@ -324,6 +331,10 @@ export default function HomePage() {
     else setHistory(data || []);
     setLoadingHistory(false);
   }, [session, filterAgent, historyFilterRide]);
+
+  useEffect(() => {
+    setSelectedHistoryCustomer(null);
+  }, [filterAgent]);
 
   useEffect(() => {
     if (session && view === 'history') loadHistory();
@@ -592,11 +603,13 @@ export default function HomePage() {
 
   function viewCustomerHistory(ride) {
     setHistoryFilterRide(ride);
+    setSelectedHistoryCustomer(null);
     setView('history');
   }
 
   function clearHistoryFilter() {
     setHistoryFilterRide(null);
+    setSelectedHistoryCustomer(null);
   }
 
   function startEditingHistory(entry) {
@@ -839,6 +852,54 @@ export default function HomePage() {
     const dest = leg === 'to_work' ? ride.to_work_dest : ride.way_back_dest;
     const doneField = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
     return { enabled, time, pickup, dest, done: ride[doneField] === businessDay };
+  }
+
+  function renderHistoryEntry(h) {
+    const needsAmounts = h.money_out == null || h.cost == null;
+    return (
+      <div className="history-row-wrap" key={h.id}>
+        <div className="history-row">
+          <div>
+            <div className="entry-name">{formatHistoryDayLabel(h.business_day, businessDay)}</div>
+            <div className="sub" style={{ marginTop: 2 }}>
+              {h.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(h.completed_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+            </div>
+          </div>
+          <div className="entry-amount">${(parseFloat(h.amount) || 0).toFixed(2)}</div>
+        </div>
+
+        {editingHistoryId === h.id ? (
+          <div className="complete-form">
+            <input type="number" step="0.01" inputMode="decimal" placeholder="Ride cost"
+              value={historyEditInputs.ride_cost}
+              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, ride_cost: e.target.value }))} />
+            <input type="number" step="0.01" inputMode="decimal" placeholder="Tip"
+              value={historyEditInputs.tip}
+              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, tip: e.target.value }))} />
+            <input type="number" step="0.01" inputMode="decimal" placeholder="Money out"
+              value={historyEditInputs.money_out}
+              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, money_out: e.target.value }))} />
+            <input type="number" step="0.01" inputMode="decimal" placeholder="Cost"
+              value={historyEditInputs.cost}
+              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, cost: e.target.value }))} />
+            <div className="complete-form-actions">
+              <button className="complete-form-confirm" onClick={() => saveHistoryEdit(h.id)}>Save</button>
+              <button className="complete-form-cancel" onClick={cancelEditingHistory}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div className="history-amounts">
+            <span>Ride cost: {h.ride_cost != null ? `$${parseFloat(h.ride_cost).toFixed(2)}` : '—'}</span>
+            <span>Tip: {h.tip != null ? `$${parseFloat(h.tip).toFixed(2)}` : '—'}</span>
+            <span>Money out: {h.money_out != null ? `$${parseFloat(h.money_out).toFixed(2)}` : '—'}</span>
+            <span>Cost: {h.cost != null ? `$${parseFloat(h.cost).toFixed(2)}` : '—'}</span>
+            <button className={needsAmounts ? 'needs-amounts' : ''} onClick={() => startEditingHistory(h)}>
+              {needsAmounts ? 'Add amounts' : 'Edit amounts'}
+            </button>
+          </div>
+        )}
+      </div>
+    );
   }
 
   function renderRideCard(r, opts = {}) {
@@ -1468,7 +1529,11 @@ export default function HomePage() {
       {view === 'history' && (
         <>
           <div className="list-header">
-            <h2>{historyFilterRide ? `${historyFilterRide.name}'s history` : `${filterAgent}'s history`}</h2>
+            <h2>
+              {historyFilterRide ? `${historyFilterRide.name}'s history`
+                : selectedHistoryCustomer ? `${selectedHistoryCustomer}'s history`
+                : `${filterAgent}'s history`}
+            </h2>
           </div>
           {historyFilterRide && (
             <div className="filter-banner">
@@ -1476,69 +1541,38 @@ export default function HomePage() {
               <button onClick={clearHistoryFilter}>Show everyone</button>
             </div>
           )}
+          {!historyFilterRide && selectedHistoryCustomer && (
+            <div className="filter-banner">
+              <span>Showing only {selectedHistoryCustomer}</span>
+              <button onClick={() => setSelectedHistoryCustomer(null)}>← All customers</button>
+            </div>
+          )}
+
           {loadingHistory ? (
             <div className="loading">Loading...</div>
           ) : history.length === 0 ? (
             <div className="empty">No completed trips logged yet.</div>
+          ) : historyFilterRide ? (
+            // Already filtered to one specific ride's history (from a customer's "History" button).
+            history.map((h) => renderHistoryEntry(h))
+          ) : selectedHistoryCustomer ? (
+            // Drilled into one customer from the grid below.
+            history.filter((h) => (h.customer_name || 'Unknown') === selectedHistoryCustomer).map((h) => renderHistoryEntry(h))
           ) : (
-            groupHistoryByCustomer(history).map(([customerName, entries]) => {
-              const customerTotal = entries.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
-              return (
-                <div key={customerName} className="history-day-group">
-                  <div className="history-day-header">
-                    <span>{customerName}</span>
-                    <span>${customerTotal.toFixed(2)}</span>
+            // Overview: one compact box per customer, sorted most-recent-first —
+            // tap a box to drill in, instead of one long scrolling list.
+            <div className="customer-grid">
+              {groupHistoryByCustomer(history).map(([customerName, entries]) => {
+                const total = entries.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+                return (
+                  <div key={customerName} className="customer-box" onClick={() => setSelectedHistoryCustomer(customerName)}>
+                    <div className="customer-box-name">{customerName}</div>
+                    <div className="customer-box-total">${total.toFixed(2)}</div>
+                    <div className="customer-box-count">{entries.length} trip{entries.length === 1 ? '' : 's'}</div>
                   </div>
-                  {entries.map((h) => {
-                    const needsAmounts = h.money_out == null || h.cost == null;
-                    return (
-                      <div className="history-row-wrap" key={h.id}>
-                        <div className="history-row">
-                          <div>
-                            <div className="entry-name">{formatHistoryDayLabel(h.business_day, businessDay)}</div>
-                            <div className="sub" style={{ marginTop: 2 }}>
-                              {h.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(h.completed_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
-                            </div>
-                          </div>
-                          <div className="entry-amount">${(parseFloat(h.amount) || 0).toFixed(2)}</div>
-                        </div>
-
-                        {editingHistoryId === h.id ? (
-                          <div className="complete-form">
-                            <input type="number" step="0.01" inputMode="decimal" placeholder="Ride cost"
-                              value={historyEditInputs.ride_cost}
-                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, ride_cost: e.target.value }))} />
-                            <input type="number" step="0.01" inputMode="decimal" placeholder="Tip"
-                              value={historyEditInputs.tip}
-                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, tip: e.target.value }))} />
-                            <input type="number" step="0.01" inputMode="decimal" placeholder="Money out"
-                              value={historyEditInputs.money_out}
-                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, money_out: e.target.value }))} />
-                            <input type="number" step="0.01" inputMode="decimal" placeholder="Cost"
-                              value={historyEditInputs.cost}
-                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, cost: e.target.value }))} />
-                            <div className="complete-form-actions">
-                              <button className="complete-form-confirm" onClick={() => saveHistoryEdit(h.id)}>Save</button>
-                              <button className="complete-form-cancel" onClick={cancelEditingHistory}>Cancel</button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="history-amounts">
-                            <span>Ride cost: {h.ride_cost != null ? `$${parseFloat(h.ride_cost).toFixed(2)}` : '—'}</span>
-                            <span>Tip: {h.tip != null ? `$${parseFloat(h.tip).toFixed(2)}` : '—'}</span>
-                            <span>Money out: {h.money_out != null ? `$${parseFloat(h.money_out).toFixed(2)}` : '—'}</span>
-                            <span>Cost: {h.cost != null ? `$${parseFloat(h.cost).toFixed(2)}` : '—'}</span>
-                            <button className={needsAmounts ? 'needs-amounts' : ''} onClick={() => startEditingHistory(h)}>
-                              {needsAmounts ? 'Add amounts' : 'Edit amounts'}
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            })
+                );
+              })}
+            </div>
           )}
         </>
       )}
