@@ -121,14 +121,14 @@ function sortKey(ride, now, businessDay) {
   return [0, Math.min(...pending.map((l) => minutesUntil(l.time, now)))];
 }
 
-function groupHistoryByDay(history) {
+function groupHistoryByCustomer(history) {
   const groups = {};
   history.forEach((h) => {
-    const day = h.business_day;
-    if (!groups[day]) groups[day] = [];
-    groups[day].push(h);
+    const name = h.customer_name || 'Unknown';
+    if (!groups[name]) groups[name] = [];
+    groups[name].push(h);
   });
-  return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
+  return Object.entries(groups).sort((a, b) => a[0].localeCompare(b[0]));
 }
 
 // Buckets an hour into the 3 requested shifts. Anything from 1am-6am (outside
@@ -235,12 +235,13 @@ export default function HomePage() {
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [driverMsgCopiedId, setDriverMsgCopiedId] = useState(null);
   const [completingKey, setCompletingKey] = useState(null);
-  const [completionInputs, setCompletionInputs] = useState({ ride_cost: '', tip: '' });
+  const [completionInputs, setCompletionInputs] = useState({ ride_cost: '', tip: '', money_out: '', cost: '' });
   const [editingHistoryId, setEditingHistoryId] = useState(null);
   const [historyEditInputs, setHistoryEditInputs] = useState({ ride_cost: '', tip: '', money_out: '', cost: '' });
   const [historyFilterRide, setHistoryFilterRide] = useState(null);
   const [teamStats, setTeamStats] = useState([]);
   const [loadingTeamStats, setLoadingTeamStats] = useState(false);
+  const [todaysHistory, setTodaysHistory] = useState([]);
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 30000);
@@ -293,6 +294,21 @@ export default function HomePage() {
     });
   }, [rides, filterAgent]);
 
+  const loadTodaysHistory = useCallback(async () => {
+    if (!session) return;
+    const bDay = businessDayStr(new Date());
+    const { data, error } = await supabase
+      .from('trip_history')
+      .select('*')
+      .eq('agent', filterAgent)
+      .eq('business_day', bDay);
+    if (!error) setTodaysHistory(data || []);
+  }, [session, filterAgent]);
+
+  useEffect(() => {
+    if (session && view === 'today' && filterAgent !== 'Team') loadTodaysHistory();
+  }, [session, view, filterAgent, loadTodaysHistory]);
+
   const loadHistory = useCallback(async () => {
     if (!session) return;
     setLoadingHistory(true);
@@ -343,7 +359,7 @@ export default function HomePage() {
     const bDay = businessDayStr(new Date());
     const { data, error } = await supabase
       .from('trip_history')
-      .select('amount, tip, ride_cost, money_out, cost, leg, completed_at')
+      .select('amount, leg, completed_at')
       .in('agent', AGENTS)
       .eq('business_day', bDay);
     if (error) setError(error.message);
@@ -492,7 +508,7 @@ export default function HomePage() {
   // Opens the inline ride-cost/tip form on a leg instead of completing it instantly.
   function startCompleting(ride, leg) {
     setCompletingKey(`${ride.id}-${leg}`);
-    setCompletionInputs({ ride_cost: '', tip: '' });
+    setCompletionInputs({ ride_cost: '', tip: '', money_out: '', cost: '' });
   }
 
   function cancelCompleting() {
@@ -520,6 +536,7 @@ export default function HomePage() {
         return;
       }
 
+      const toNumOrNull = (v) => (v === '' ? null : parseFloat(v) || 0);
       await supabase.from('trip_history').insert({
         user_id: session.user.id,
         ride_id: ride.id,
@@ -527,15 +544,16 @@ export default function HomePage() {
         customer_name: ride.name,
         leg,
         amount: ride.amount || 0,
-        ride_cost: completionInputs.ride_cost === '' ? null : parseFloat(completionInputs.ride_cost) || 0,
-        tip: completionInputs.tip === '' ? null : parseFloat(completionInputs.tip) || 0,
-        money_out: null,
-        cost: null,
+        ride_cost: toNumOrNull(completionInputs.ride_cost),
+        tip: toNumOrNull(completionInputs.tip),
+        money_out: toNumOrNull(completionInputs.money_out),
+        cost: toNumOrNull(completionInputs.cost),
         business_day: bDay,
       });
 
       setCompletingKey(null);
       loadRides();
+      loadTodaysHistory();
       if (view === 'history') loadHistory();
     } finally {
       togglingRef.current.delete(flightKey);
@@ -565,6 +583,7 @@ export default function HomePage() {
         .eq('ride_id', ride.id).eq('leg', leg).eq('business_day', bDay);
 
       loadRides();
+      loadTodaysHistory();
       if (view === 'history') loadHistory();
     } finally {
       togglingRef.current.delete(flightKey);
@@ -606,6 +625,7 @@ export default function HomePage() {
     else {
       setEditingHistoryId(null);
       loadHistory();
+      loadTodaysHistory();
     }
   }
 
@@ -919,6 +939,19 @@ export default function HomePage() {
                         value={completionInputs.tip}
                         onChange={(e) => setCompletionInputs((c) => ({ ...c, tip: e.target.value }))}
                       />
+                      <input
+                        type="number" step="0.01" inputMode="decimal" placeholder="Money out"
+                        value={completionInputs.money_out}
+                        onChange={(e) => setCompletionInputs((c) => ({ ...c, money_out: e.target.value }))}
+                      />
+                      <input
+                        type="number" step="0.01" inputMode="decimal" placeholder="Cost"
+                        value={completionInputs.cost}
+                        onChange={(e) => setCompletionInputs((c) => ({ ...c, cost: e.target.value }))}
+                      />
+                      <div className="sub" style={{ width: '100%', marginTop: -4 }}>
+                        Leave any of these blank if you don't know them yet — fill them in later from here or History.
+                      </div>
                       <div className="complete-form-actions">
                         <button className="complete-form-confirm" onClick={() => confirmComplete(r, leg)}>
                           Confirm complete
@@ -953,18 +986,47 @@ export default function HomePage() {
             })}
 
             {opts.dimmed && (
-              <div className="trip-actions">
+              <div className="dimmed-legs">
                 {['to_work', 'way_back'].map((leg) => {
                   const info = legInfo(r, leg);
                   if (!info.enabled || !info.time) return null;
+                  const entry = todaysHistory.find((h) => h.ride_id === r.id && h.leg === leg);
                   return (
-                    <button
-                      key={leg}
-                      className="complete-btn done"
-                      onClick={() => uncompleteLeg(r, leg)}
-                    >
-                      ✓ {leg === 'to_work' ? 'To-work' : 'Way-back'} done — undo
-                    </button>
+                    <div key={leg} className="dimmed-leg-block">
+                      <button className="complete-btn done" onClick={() => uncompleteLeg(r, leg)}>
+                        ✓ {leg === 'to_work' ? 'To-work' : 'Way-back'} done — undo
+                      </button>
+                      {entry && (
+                        editingHistoryId === entry.id ? (
+                          <div className="complete-form">
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Ride cost"
+                              value={historyEditInputs.ride_cost}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, ride_cost: e.target.value }))} />
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Tip"
+                              value={historyEditInputs.tip}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, tip: e.target.value }))} />
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Money out"
+                              value={historyEditInputs.money_out}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, money_out: e.target.value }))} />
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Cost"
+                              value={historyEditInputs.cost}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, cost: e.target.value }))} />
+                            <div className="complete-form-actions">
+                              <button className="complete-form-confirm" onClick={() => saveHistoryEdit(entry.id)}>Save</button>
+                              <button className="complete-form-cancel" onClick={cancelEditingHistory}>Cancel</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="history-amounts">
+                            <span>Ride cost: {entry.ride_cost != null ? `$${parseFloat(entry.ride_cost).toFixed(2)}` : '—'}</span>
+                            <span>Tip: {entry.tip != null ? `$${parseFloat(entry.tip).toFixed(2)}` : '—'}</span>
+                            <span>Money out: {entry.money_out != null ? `$${parseFloat(entry.money_out).toFixed(2)}` : '—'}</span>
+                            <span>Cost: {entry.cost != null ? `$${parseFloat(entry.cost).toFixed(2)}` : '—'}</span>
+                            <button onClick={() => startEditingHistory(entry)}>Edit amounts</button>
+                          </div>
+                        )
+                      )}
+                    </div>
                   );
                 })}
               </div>
@@ -1419,13 +1481,13 @@ export default function HomePage() {
           ) : history.length === 0 ? (
             <div className="empty">No completed trips logged yet.</div>
           ) : (
-            groupHistoryByDay(history).map(([day, entries]) => {
-              const dayTotal = entries.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+            groupHistoryByCustomer(history).map(([customerName, entries]) => {
+              const customerTotal = entries.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
               return (
-                <div key={day} className="history-day-group">
+                <div key={customerName} className="history-day-group">
                   <div className="history-day-header">
-                    <span>{formatHistoryDayLabel(day, businessDay)}</span>
-                    <span>${dayTotal.toFixed(2)}</span>
+                    <span>{customerName}</span>
+                    <span>${customerTotal.toFixed(2)}</span>
                   </div>
                   {entries.map((h) => {
                     const needsAmounts = h.money_out == null || h.cost == null;
@@ -1433,7 +1495,7 @@ export default function HomePage() {
                       <div className="history-row-wrap" key={h.id}>
                         <div className="history-row">
                           <div>
-                            <div className="entry-name">{h.customer_name}</div>
+                            <div className="entry-name">{formatHistoryDayLabel(h.business_day, businessDay)}</div>
                             <div className="sub" style={{ marginTop: 2 }}>
                               {h.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(h.completed_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
                             </div>
@@ -1506,7 +1568,6 @@ export default function HomePage() {
               const bucket = teamStats.filter((h) => phaseForHour(new Date(h.completed_at).getHours()) === key);
               if (key === 'other' && bucket.length === 0) return null;
               const total = bucket.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
-              const tips = bucket.reduce((s, h) => s + (parseFloat(h.tip) || 0), 0);
               return (
                 <div key={key} className="phase-card">
                   <div className="phase-header">
@@ -1515,7 +1576,6 @@ export default function HomePage() {
                   </div>
                   <div className="stats-row">
                     <span className="stat-pill">💵 ${total.toFixed(2)} collected</span>
-                    <span className="stat-pill">💰 ${tips.toFixed(2)} tips</span>
                   </div>
                 </div>
               );
