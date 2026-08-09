@@ -548,13 +548,20 @@ export default function HomePage() {
       }
 
       const toNumOrNull = (v) => (v === '' ? null : parseFloat(v) || 0);
+      // The price on the ride is the full round-trip price, not per leg — so if
+      // both legs are active, split it evenly between them. Completing both
+      // still adds up to the right total instead of counting the full price twice.
+      const legCount = activeLegs(ride).length;
+      const fullAmount = parseFloat(ride.amount) || 0;
+      const legAmount = legCount > 1 ? fullAmount / 2 : fullAmount;
+
       await supabase.from('trip_history').insert({
         user_id: session.user.id,
         ride_id: ride.id,
         agent: ride.agent,
         customer_name: ride.name,
         leg,
-        amount: ride.amount || 0,
+        amount: legAmount,
         ride_cost: toNumOrNull(completionInputs.ride_cost),
         tip: toNumOrNull(completionInputs.tip),
         money_out: toNumOrNull(completionInputs.money_out),
@@ -637,6 +644,16 @@ export default function HomePage() {
     if (error) setError(error.message);
     else {
       setEditingHistoryId(null);
+      loadHistory();
+      loadTodaysHistory();
+    }
+  }
+
+  async function deleteHistoryEntry(entryId) {
+    if (!confirm('Delete this history entry?')) return;
+    const { error } = await supabase.from('trip_history').delete().eq('id', entryId);
+    if (error) setError(error.message);
+    else {
       loadHistory();
       loadTodaysHistory();
     }
@@ -896,6 +913,7 @@ export default function HomePage() {
             <button className={needsAmounts ? 'needs-amounts' : ''} onClick={() => startEditingHistory(h)}>
               {needsAmounts ? 'Add amounts' : 'Edit amounts'}
             </button>
+            <button onClick={() => deleteHistoryEntry(h.id)}>Delete</button>
           </div>
         )}
       </div>
@@ -1084,6 +1102,7 @@ export default function HomePage() {
                             <span>Money out: {entry.money_out != null ? `$${parseFloat(entry.money_out).toFixed(2)}` : '—'}</span>
                             <span>Cost: {entry.cost != null ? `$${parseFloat(entry.cost).toFixed(2)}` : '—'}</span>
                             <button onClick={() => startEditingHistory(entry)}>Edit amounts</button>
+                            <button onClick={() => deleteHistoryEntry(entry.id)}>Delete</button>
                           </div>
                         )
                       )}
@@ -1440,6 +1459,7 @@ export default function HomePage() {
                 <div className="entry-actions">
                   <button onClick={() => startEdit(r)}>Edit</button>
                   <button onClick={() => togglePaid(r)}>Mark unpaid</button>
+                  <button onClick={() => handleDelete(r.id)}>Delete</button>
                 </div>
               </div>
             ))
