@@ -4,11 +4,11 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabaseClient';
 
-const AGENTS = ['Hamzah', 'Hemam', 'Talal'];
+const AGENTS = ['Hamzah', 'Talal'];
 const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const VIEWS = ['today', 'customers', 'quicklist', 'calendar', 'history'];
-const VIEW_LABELS = { today: 'Today', customers: 'Customers', quicklist: 'Quick list', calendar: 'Calendar', history: 'History' };
+const VIEWS = ['today', 'customers', 'paid', 'calendar', 'stats', 'history'];
+const VIEW_LABELS = { today: 'Today', customers: 'Customers', paid: 'Paid', calendar: 'Calendar', stats: 'Earnings', history: 'History' };
 
 const emptyForm = {
   name: '',
@@ -27,22 +27,26 @@ const emptyForm = {
   notes: '',
   agent: AGENTS[0],
   days_of_week: [0, 1, 2, 3, 4, 5, 6],
+  paid: false,
+  active: true,
 };
 
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
 function localDateStr(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
-// The "business day" only rolls over at 3am local time, not at midnight — so a ride
-// completed at 1am still counts as last night's ride until 3am. This uses local time
-// components (not toISOString, which is UTC and was the source of the earlier bug).
+// The business day only rolls over at RESET_HOUR local time, not at midnight —
+// so a ride completed at 12:30am still counts as last night's ride until the
+// reset. This uses local time components (not toISOString, which is UTC).
+const RESET_HOUR = 1;
+
 function businessDayStr(d) {
   const shifted = new Date(d);
-  if (shifted.getHours() < 3) shifted.setDate(shifted.getDate() - 1);
+  if (shifted.getHours() < RESET_HOUR) shifted.setDate(shifted.getDate() - 1);
   return localDateStr(shifted);
 }
 function businessWeekday(d) {
   const shifted = new Date(d);
-  if (shifted.getHours() < 3) shifted.setDate(shifted.getDate() - 1);
+  if (shifted.getHours() < RESET_HOUR) shifted.setDate(shifted.getDate() - 1);
   return shifted.getDay();
 }
 
@@ -75,12 +79,19 @@ function fmtTime(t) {
   return `${h12}:${m} ${ampm}`;
 }
 
+// Maps a wall-clock time onto a continuous scale where the business day starts
+// at RESET_HOUR — so 23:50 and 00:10 stay in the right order relative to each
+// other, and a ride whose time has already passed today shows as genuinely
+// overdue (negative) instead of wrapping around to "23 hours from now."
+function businessMinutes(hours, minutes) {
+  let total = hours * 60 + minutes;
+  if (hours < RESET_HOUR) total += 24 * 60;
+  return total;
+}
+
 function minutesUntil(t, now) {
-  const nowMin = now.getHours() * 60 + now.getMinutes();
   const [h, m] = t.split(':').map(Number);
-  let mins = h * 60 + m - nowMin;
-  if (mins < 0) mins += 24 * 60;
-  return mins;
+  return businessMinutes(h, m) - businessMinutes(now.getHours(), now.getMinutes());
 }
 
 function activeLegs(ride) {
@@ -110,8 +121,42 @@ function sortKey(ride, now, businessDay) {
   return [0, Math.min(...pending.map((l) => minutesUntil(l.time, now)))];
 }
 
+function groupHistoryByDay(history) {
+  const groups = {};
+  history.forEach((h) => {
+    const day = h.business_day;
+    if (!groups[day]) groups[day] = [];
+    groups[day].push(h);
+  });
+  return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
+}
+
+// Buckets an hour into the 3 requested shifts. Anything from 1am-6am (outside
+// all three) falls into "other" so nothing silently gets dropped from stats.
+function phaseForHour(hour) {
+  if (hour >= 6 && hour < 14) return 'morning';
+  if (hour >= 14 && hour < 20) return 'evening';
+  if (hour >= 20 || hour < 1) return 'night';
+  return 'other';
+}
+
+function formatHistoryDayLabel(dayStr, todayBusinessDay) {
+  if (dayStr === todayBusinessDay) return 'Today';
+  const [ty, tm, td] = todayBusinessDay.split('-').map(Number);
+  const [y, m, d] = dayStr.split('-').map(Number);
+  const todayDate = new Date(ty, tm - 1, td);
+  const dayDate = new Date(y, m - 1, d);
+  const diffDays = Math.round((todayDate - dayDate) / 86400000);
+  if (diffDays === 1) return 'Yesterday';
+  return dayDate.toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric',
+    year: y !== ty ? 'numeric' : undefined,
+  });
+}
+
 function ridesScheduledOnWeekday(rides, weekdayIdx) {
   return rides.filter((r) => {
+    if (r.active === false) return false;
     if (activeLegs(r).length === 0) return false;
     if (!r.days_of_week || r.days_of_week.length === 0) return true;
     return r.days_of_week.includes(weekdayIdx);
@@ -133,14 +178,30 @@ function waLink(mobile) {
   const num = toWhatsappNumber(mobile);
   return num ? `https://wa.me/${num}` : null;
 }
+function callLink(mobile) {
+  const num = toWhatsappNumber(mobile);
+  return num ? `tel:+${num}` : null;
+}
 
 function formatCountdown(mins) {
   if (mins == null || !isFinite(mins)) return '';
+  if (mins < 0) {
+    const overdue = Math.abs(mins);
+    const h = Math.floor(overdue / 60);
+    const m = Math.round(overdue % 60);
+    return h > 0 ? `overdue ${h}h ${m}m` : `overdue ${m} min`;
+  }
   if (mins < 1) return 'now';
   const h = Math.floor(mins / 60);
   const m = Math.round(mins % 60);
   if (h > 0) return `${h}h ${m}m`;
   return `${m} min`;
+}
+
+function tagCountdownText(mins) {
+  if (mins == null) return '';
+  const formatted = formatCountdown(mins);
+  return mins < 0 ? ` · ${formatted.replace('overdue', 'by')}` : ` · in ${formatted}`;
 }
 
 export default function HomePage() {
@@ -156,18 +217,30 @@ export default function HomePage() {
   const [filterAgent, setFilterAgent] = useState(AGENTS[0]);
   const [view, setView] = useState('today');
   const [tick, setTick] = useState(0);
-  const [geoCache, setGeoCache] = useState({});
   const [uberUrls, setUberUrls] = useState({});
   const resolvingUberRef = useRef(new Set());
+  const togglingRef = useRef(new Set());
+  const textCoordCache = useRef({});
   const [copyOpenId, setCopyOpenId] = useState(null);
   const [history, setHistory] = useState([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [statsRange, setStatsRange] = useState('week');
+  const [statsData, setStatsData] = useState([]);
+  const [loadingStats, setLoadingStats] = useState(false);
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return d;
   });
   const [selectedWeekday, setSelectedWeekday] = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
   const [expandedIds, setExpandedIds] = useState(new Set());
   const [driverMsgCopiedId, setDriverMsgCopiedId] = useState(null);
+  const [completingKey, setCompletingKey] = useState(null);
+  const [completionInputs, setCompletionInputs] = useState({ ride_cost: '', tip: '' });
+  const [editingHistoryId, setEditingHistoryId] = useState(null);
+  const [historyEditInputs, setHistoryEditInputs] = useState({ ride_cost: '', tip: '', money_out: '', cost: '' });
+  const [historyFilterRide, setHistoryFilterRide] = useState(null);
+  const [teamStats, setTeamStats] = useState([]);
+  const [loadingTeamStats, setLoadingTeamStats] = useState(false);
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 30000);
@@ -201,10 +274,13 @@ export default function HomePage() {
     if (session) loadRides();
   }, [session, loadRides]);
 
-  // Pre-resolves every visible leg's Uber link in the background the moment rides
-  // load or change, so buttons are already real, tappable links by the time you see them.
+  // Pre-resolves Uber links for today's scheduled rides only (not the whole
+  // customer roster — Customers/Quick list/Calendar resolve lazily on expand
+  // instead, see toggleExpand). Keeps this from firing dozens of unnecessary
+  // lookups every time you switch agents.
   useEffect(() => {
-    const relevant = rides.filter((r) => r.agent === filterAgent);
+    const bWeekday = businessWeekday(new Date());
+    const relevant = ridesScheduledOnWeekday(rides.filter((r) => r.agent === filterAgent), bWeekday);
     relevant.forEach((r) => {
       ['to_work', 'way_back'].forEach((leg) => {
         const enabled = leg === 'to_work' ? r.to_work_enabled !== false : r.way_back_enabled !== false;
@@ -220,20 +296,64 @@ export default function HomePage() {
   const loadHistory = useCallback(async () => {
     if (!session) return;
     setLoadingHistory(true);
-    const { data, error } = await supabase
+    let query = supabase
       .from('trip_history')
       .select('*')
       .eq('agent', filterAgent)
       .order('completed_at', { ascending: false })
       .limit(200);
+    if (historyFilterRide) query = query.eq('ride_id', historyFilterRide.id);
+    const { data, error } = await query;
     if (error) setError(error.message);
     else setHistory(data || []);
     setLoadingHistory(false);
-  }, [session, filterAgent]);
+  }, [session, filterAgent, historyFilterRide]);
 
   useEffect(() => {
     if (session && view === 'history') loadHistory();
-  }, [session, view, filterAgent, loadHistory]);
+  }, [session, view, filterAgent, historyFilterRide, loadHistory]);
+
+  const loadStats = useCallback(async () => {
+    if (!session) return;
+    setLoadingStats(true);
+    const bDay = businessDayStr(new Date());
+    const daysBack = statsRange === 'today' ? 0 : statsRange === 'week' ? 6 : 29;
+    const [y, m, d] = bDay.split('-').map(Number);
+    const fromDate = new Date(y, m - 1, d);
+    fromDate.setDate(fromDate.getDate() - daysBack);
+    const fromStr = localDateStr(fromDate);
+
+    const { data, error } = await supabase
+      .from('trip_history')
+      .select('amount, leg, business_day')
+      .eq('agent', filterAgent)
+      .gte('business_day', fromStr);
+    if (error) setError(error.message);
+    else setStatsData(data || []);
+    setLoadingStats(false);
+  }, [session, filterAgent, statsRange]);
+
+  useEffect(() => {
+    if (session && view === 'stats') loadStats();
+  }, [session, view, filterAgent, statsRange, loadStats]);
+
+  const loadTeamStats = useCallback(async () => {
+    if (!session) return;
+    setLoadingTeamStats(true);
+    const bDay = businessDayStr(new Date());
+    const { data, error } = await supabase
+      .from('trip_history')
+      .select('amount, tip, ride_cost, money_out, cost, leg, completed_at')
+      .in('agent', AGENTS)
+      .eq('business_day', bDay);
+    if (error) setError(error.message);
+    else setTeamStats(data || []);
+    setLoadingTeamStats(false);
+  }, [session]);
+
+  useEffect(() => {
+    if (session && filterAgent === 'Team') loadTeamStats();
+  }, [session, filterAgent, loadTeamStats]);
 
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -276,6 +396,8 @@ export default function HomePage() {
       notes: ride.notes || '',
       agent: ride.agent || AGENTS[0],
       days_of_week: ride.days_of_week && ride.days_of_week.length ? ride.days_of_week : [0, 1, 2, 3, 4, 5, 6],
+      paid: !!ride.paid,
+      active: ride.active !== false,
     });
     setEditingId(ride.id);
     setView('today');
@@ -312,12 +434,38 @@ export default function HomePage() {
       amount: parseFloat(form.amount) || 0,
       notes: form.notes.trim(),
       days_of_week: form.days_of_week,
+      paid: form.paid,
+      active: form.active,
     };
+
+    // If an address changed, its cached coordinates are now wrong — clear them so
+    // it gets re-resolved instead of quietly sending Uber to the old location.
+    const original = editingId ? rides.find((r) => r.id === editingId) : null;
+    ['to_work', 'way_back'].forEach((leg) => {
+      const pickupField = `${leg}_pickup`;
+      const destField = `${leg}_dest`;
+      const pickupChanged = !original || original[pickupField] !== payload[pickupField];
+      const destChanged = !original || original[destField] !== payload[destField];
+      if (pickupChanged) { payload[`${pickupField}_lat`] = null; payload[`${pickupField}_lon`] = null; }
+      if (destChanged) { payload[`${destField}_lat`] = null; payload[`${destField}_lon`] = null; }
+    });
 
     let saveError;
     if (editingId) {
       const { error } = await supabase.from('rides').update(payload).eq('id', editingId);
       saveError = error;
+      if (!error) {
+        // Drop any in-memory resolved link for this ride so the (possibly new)
+        // address gets looked up fresh instead of reusing a stale result.
+        resolvingUberRef.current.delete(`${editingId}-to_work`);
+        resolvingUberRef.current.delete(`${editingId}-way_back`);
+        setUberUrls((u) => {
+          const next = { ...u };
+          delete next[`${editingId}-to_work`];
+          delete next[`${editingId}-way_back`];
+          return next;
+        });
+      }
     } else {
       payload.user_id = session.user.id;
       const { error } = await supabase.from('rides').insert(payload);
@@ -341,24 +489,37 @@ export default function HomePage() {
     else loadRides();
   }
 
-  async function toggleComplete(ride, leg) {
-    const field = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
-    const bDay = businessDayStr(new Date());
-    const isDone = ride[field] === bDay;
+  // Opens the inline ride-cost/tip form on a leg instead of completing it instantly.
+  function startCompleting(ride, leg) {
+    setCompletingKey(`${ride.id}-${leg}`);
+    setCompletionInputs({ ride_cost: '', tip: '' });
+  }
 
-    const { error } = await supabase
-      .from('rides')
-      .update({ [field]: isDone ? null : bDay })
-      .eq('id', ride.id);
-    if (error) {
-      setError(error.message);
-      return;
-    }
+  function cancelCompleting() {
+    setCompletingKey(null);
+  }
 
-    if (isDone) {
-      await supabase.from('trip_history').delete()
-        .eq('ride_id', ride.id).eq('leg', leg).eq('business_day', bDay);
-    } else {
+  // Confirms completion with whatever ride cost/tip were entered. Money out and
+  // cost are left blank here on purpose — those get filled in later (e.g. by
+  // Hamzah) from the History tab, via editHistoryEntry.
+  async function confirmComplete(ride, leg) {
+    const flightKey = `${ride.id}-${leg}`;
+    if (togglingRef.current.has(flightKey)) return;
+    togglingRef.current.add(flightKey);
+
+    try {
+      const field = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
+      const bDay = businessDayStr(new Date());
+
+      const { error } = await supabase
+        .from('rides')
+        .update({ [field]: bDay })
+        .eq('id', ride.id);
+      if (error) {
+        setError(error.message);
+        return;
+      }
+
       await supabase.from('trip_history').insert({
         user_id: session.user.id,
         ride_id: ride.id,
@@ -366,11 +527,98 @@ export default function HomePage() {
         customer_name: ride.name,
         leg,
         amount: ride.amount || 0,
+        ride_cost: completionInputs.ride_cost === '' ? null : parseFloat(completionInputs.ride_cost) || 0,
+        tip: completionInputs.tip === '' ? null : parseFloat(completionInputs.tip) || 0,
+        money_out: null,
+        cost: null,
         business_day: bDay,
       });
+
+      setCompletingKey(null);
+      loadRides();
+      if (view === 'history') loadHistory();
+    } finally {
+      togglingRef.current.delete(flightKey);
     }
-    loadRides();
-    if (view === 'history') loadHistory();
+  }
+
+  // Undoing a completion doesn't need the cost/tip form — just reverses it.
+  async function uncompleteLeg(ride, leg) {
+    const flightKey = `${ride.id}-${leg}`;
+    if (togglingRef.current.has(flightKey)) return;
+    togglingRef.current.add(flightKey);
+
+    try {
+      const field = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
+      const bDay = businessDayStr(new Date());
+
+      const { error } = await supabase
+        .from('rides')
+        .update({ [field]: null })
+        .eq('id', ride.id);
+      if (error) {
+        setError(error.message);
+        return;
+      }
+
+      await supabase.from('trip_history').delete()
+        .eq('ride_id', ride.id).eq('leg', leg).eq('business_day', bDay);
+
+      loadRides();
+      if (view === 'history') loadHistory();
+    } finally {
+      togglingRef.current.delete(flightKey);
+    }
+  }
+
+  function viewCustomerHistory(ride) {
+    setHistoryFilterRide(ride);
+    setView('history');
+  }
+
+  function clearHistoryFilter() {
+    setHistoryFilterRide(null);
+  }
+
+  function startEditingHistory(entry) {
+    setEditingHistoryId(entry.id);
+    setHistoryEditInputs({
+      ride_cost: entry.ride_cost ?? '',
+      tip: entry.tip ?? '',
+      money_out: entry.money_out ?? '',
+      cost: entry.cost ?? '',
+    });
+  }
+
+  function cancelEditingHistory() {
+    setEditingHistoryId(null);
+  }
+
+  async function saveHistoryEdit(entryId) {
+    const toNumOrNull = (v) => (v === '' ? null : parseFloat(v) || 0);
+    const { error } = await supabase.from('trip_history').update({
+      ride_cost: toNumOrNull(historyEditInputs.ride_cost),
+      tip: toNumOrNull(historyEditInputs.tip),
+      money_out: toNumOrNull(historyEditInputs.money_out),
+      cost: toNumOrNull(historyEditInputs.cost),
+    }).eq('id', entryId);
+    if (error) setError(error.message);
+    else {
+      setEditingHistoryId(null);
+      loadHistory();
+    }
+  }
+
+  async function togglePaid(ride) {
+    const { error } = await supabase.from('rides').update({ paid: !ride.paid }).eq('id', ride.id);
+    if (error) setError(error.message);
+    else loadRides();
+  }
+
+  async function toggleActive(ride) {
+    const { error } = await supabase.from('rides').update({ active: ride.active === false }).eq('id', ride.id);
+    if (error) setError(error.message);
+    else loadRides();
   }
 
   async function copyToAgent(ride, targetAgent) {
@@ -393,50 +641,39 @@ export default function HomePage() {
     }
   }
 
-  async function geocodeAddress(address) {
-    const key = address.trim().toLowerCase();
-    if (geoCache[key] !== undefined) return geoCache[key];
-    try {
-      const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`
-      );
-      const data = await res.json();
-      const coord = data && data.length > 0
-        ? { lat: parseFloat(data[0].lat), lon: parseFloat(data[0].lon) }
-        : null;
-      setGeoCache((c) => ({ ...c, [key]: coord }));
-      return coord;
-    } catch (e) {
-      return null;
-    }
-  }
-
-  async function followShortMapLink(url) {
-    try {
-      const res = await fetch(url);
-      const finalUrl = res.url;
-      return extractCoordsFromUrl(finalUrl);
-    } catch (e) {
-      return null;
-    }
-  }
-
+  // Resolves plain addresses or maps links to coordinates. Full links with
+  // @lat,lng resolve instantly with no network call. Everything else goes
+  // through our own /api/resolve-location route (see that file for why this
+  // has to happen server-side rather than in the browser).
   async function resolveCoord(text) {
     if (!text) return null;
     if (isUrl(text)) {
-      // First try extracting coords directly (for full links with @lat,lng)
       const direct = extractCoordsFromUrl(text);
       if (direct) return direct;
-      // If no direct coords found, it's likely a short link — follow the redirect
-      return followShortMapLink(text);
     }
-    return geocodeAddress(text);
+    const key = text.trim().toLowerCase();
+    if (textCoordCache.current[key] !== undefined) return textCoordCache.current[key];
+    let coord = null;
+    try {
+      const res = await fetch(`/api/resolve-location?text=${encodeURIComponent(text)}`);
+      const data = await res.json();
+      coord = data.coords || null;
+    } catch (e) {
+      coord = null;
+    }
+    textCoordCache.current[key] = coord;
+    return coord;
   }
 
   // Resolves a leg's Uber link in the background, well before the button is tapped.
   // This is the fix: iOS will only open the Uber app (instead of falling back to the
   // website) when the link is a real <a href> tapped directly — any lookup done
   // *after* the tap breaks that trust and Safari loads the web page instead.
+  //
+  // Coordinates are cached permanently on the ride itself (see migration 5) —
+  // once an address is resolved, it's never looked up again on any device,
+  // unless the address text changes (handleSave clears the cache for legs
+  // whose text was edited).
   async function resolveUberUrl(ride, leg) {
     const key = `${ride.id}-${leg}`;
     if (resolvingUberRef.current.has(key) || uberUrls[key] !== undefined) return;
@@ -444,9 +681,21 @@ export default function HomePage() {
 
     const pickupText = leg === 'to_work' ? ride.to_work_pickup : ride.way_back_pickup;
     const destText = leg === 'to_work' ? ride.to_work_dest : ride.way_back_dest;
+    const pickupLatField = `${leg}_pickup_lat`;
+    const pickupLonField = `${leg}_pickup_lon`;
+    const destLatField = `${leg}_dest_lat`;
+    const destLonField = `${leg}_dest_lon`;
+
+    const cachedPickup = ride[pickupLatField] != null && ride[pickupLonField] != null
+      ? { lat: ride[pickupLatField], lon: ride[pickupLonField] }
+      : null;
+    const cachedDest = ride[destLatField] != null && ride[destLonField] != null
+      ? { lat: ride[destLatField], lon: ride[destLonField] }
+      : null;
+
     const [pickupCoord, destCoord] = await Promise.all([
-      resolveCoord(pickupText),
-      resolveCoord(destText),
+      cachedPickup || resolveCoord(pickupText),
+      cachedDest || resolveCoord(destText),
     ]);
 
     let url = null;
@@ -455,6 +704,14 @@ export default function HomePage() {
         `https://m.uber.com/ul/?action=setPickup` +
         `&pickup[latitude]=${pickupCoord.lat}&pickup[longitude]=${pickupCoord.lon}&pickup[nickname]=${encodeURIComponent(pickupText)}` +
         `&dropoff[latitude]=${destCoord.lat}&dropoff[longitude]=${destCoord.lon}&dropoff[nickname]=${encodeURIComponent(destText)}`;
+
+      // Persist newly-resolved coordinates so this address is never geocoded again.
+      const updates = {};
+      if (!cachedPickup) { updates[pickupLatField] = pickupCoord.lat; updates[pickupLonField] = pickupCoord.lon; }
+      if (!cachedDest) { updates[destLatField] = destCoord.lat; updates[destLonField] = destCoord.lon; }
+      if (Object.keys(updates).length > 0) {
+        supabase.from('rides').update(updates).eq('id', ride.id).then(() => {});
+      }
     }
     setUberUrls((u) => ({ ...u, [key]: url }));
   }
@@ -474,8 +731,23 @@ export default function HomePage() {
   function toggleExpand(id) {
     setExpandedIds((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+        // Lazily resolve this ride's Uber links only now that it's actually
+        // being looked at — Customers/Quick list aren't pre-resolved eagerly.
+        const ride = rides.find((r) => r.id === id);
+        if (ride) {
+          ['to_work', 'way_back'].forEach((leg) => {
+            const enabled = leg === 'to_work' ? ride.to_work_enabled !== false : ride.way_back_enabled !== false;
+            const time = leg === 'to_work' ? ride.to_work_time : ride.way_back_time;
+            const pickup = leg === 'to_work' ? ride.to_work_pickup : ride.way_back_pickup;
+            const dest = leg === 'to_work' ? ride.to_work_dest : ride.way_back_dest;
+            if (enabled && time && canUber(pickup) && canUber(dest)) resolveUberUrl(ride, leg);
+          });
+        }
+      }
       return next;
     });
   }
@@ -514,6 +786,9 @@ export default function HomePage() {
   const dateLabel = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 
   const agentRides = rides.filter((r) => r.agent === filterAgent);
+  const searchedRides = searchQuery.trim()
+    ? agentRides.filter((r) => r.name.toLowerCase().includes(searchQuery.trim().toLowerCase()))
+    : agentRides;
   const todaysRides = ridesScheduledOnWeekday(agentRides, todayWeekday);
   const pendingToday = todaysRides.filter((r) => !isFullyComplete(r, businessDay));
   const completedToday = todaysRides.filter((r) => isFullyComplete(r, businessDay));
@@ -530,7 +805,9 @@ export default function HomePage() {
   const firstPendingId = sortedPending[0]?.id;
   const nextUpMinutes = sortedPending.length > 0 ? sortKey(sortedPending[0], now, businessDay)[1] : null;
 
-  const quickList = [...agentRides].sort((a, b) => a.name.localeCompare(b.name));
+  const statsTotal = statsData.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+  const statsToWorkCount = statsData.filter((h) => h.leg === 'to_work').length;
+  const statsWayBackCount = statsData.filter((h) => h.leg === 'way_back').length;
 
   const daysInCalMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate();
   const firstWeekday = calendarMonth.getDay();
@@ -548,12 +825,15 @@ export default function HomePage() {
     const isNextUp = opts.isNextUp;
     const isExpanded = expandedIds.has(r.id);
     const wa = waLink(r.mobile_number);
+    const call = callLink(r.mobile_number);
+    const isOverdue = isNextUp && opts.nextUpMinutes != null && opts.nextUpMinutes < 0;
     return (
-      <div className={`entry ${isNextUp ? 'next-up' : ''} ${opts.dimmed ? 'entry-dimmed' : ''}`} key={r.id}>
+      <div className={`entry ${isNextUp ? 'next-up' : ''} ${isOverdue ? 'overdue' : ''} ${opts.dimmed ? 'entry-dimmed' : ''}`} key={r.id}>
         {isNextUp && (
-          <div className="next-up-tag">
-            <span className="pulse-dot"></span> Up next
-            {opts.nextUpMinutes != null && ` · in ${formatCountdown(opts.nextUpMinutes)}`}
+          <div className={`next-up-tag ${isOverdue ? 'overdue' : ''}`}>
+            <span className="pulse-dot"></span>
+            {isOverdue ? '⚠️ Overdue' : 'Up next'}
+            {tagCountdownText(opts.nextUpMinutes)}
           </div>
         )}
         <div className="entry-top entry-top-clickable" onClick={() => toggleExpand(r.id)}>
@@ -600,6 +880,11 @@ export default function HomePage() {
                 <button className="copy-btn" onClick={() => copyNumber(r)}>
                   {copiedId === r.id ? 'Copied!' : 'Copy'}
                 </button>
+                {call && (
+                  <a className="call-btn" href={call}>
+                    Call
+                  </a>
+                )}
                 {wa && (
                   <a className="wa-btn" href={wa} target="_blank" rel="noopener noreferrer">
                     WhatsApp
@@ -613,6 +898,8 @@ export default function HomePage() {
               if (!info.enabled || !info.time) return null;
               const tagClass = leg === 'to_work' ? 'to-work' : 'way-back';
               const tagLabel = leg === 'to_work' ? 'To work' : 'Way back';
+              const legKey = `${r.id}-${leg}`;
+              const isCompleting = completingKey === legKey;
               return (
                 <div key={leg}>
                   <div className="trip-line">
@@ -620,11 +907,31 @@ export default function HomePage() {
                     <span className="trip-time">{fmtTime(info.time)}</span>
                     <span>{renderLocation(info.pickup)} → {renderLocation(info.dest)}</span>
                   </div>
-                  {!opts.dimmed && (
+                  {!opts.dimmed && isCompleting && (
+                    <div className="complete-form">
+                      <input
+                        type="number" step="0.01" inputMode="decimal" placeholder="Ride cost"
+                        value={completionInputs.ride_cost}
+                        onChange={(e) => setCompletionInputs((c) => ({ ...c, ride_cost: e.target.value }))}
+                      />
+                      <input
+                        type="number" step="0.01" inputMode="decimal" placeholder="Tip"
+                        value={completionInputs.tip}
+                        onChange={(e) => setCompletionInputs((c) => ({ ...c, tip: e.target.value }))}
+                      />
+                      <div className="complete-form-actions">
+                        <button className="complete-form-confirm" onClick={() => confirmComplete(r, leg)}>
+                          Confirm complete
+                        </button>
+                        <button className="complete-form-cancel" onClick={cancelCompleting}>Cancel</button>
+                      </div>
+                    </div>
+                  )}
+                  {!opts.dimmed && !isCompleting && (
                     <div className="trip-actions">
                       <button
                         className={`complete-btn ${info.done ? 'done' : ''}`}
-                        onClick={() => toggleComplete(r, leg)}
+                        onClick={() => info.done ? uncompleteLeg(r, leg) : startCompleting(r, leg)}
                       >
                         {info.done ? '✓ Completed' : `Mark ${leg === 'to_work' ? 'to-work' : 'way-back'} complete`}
                       </button>
@@ -654,7 +961,7 @@ export default function HomePage() {
                     <button
                       key={leg}
                       className="complete-btn done"
-                      onClick={() => toggleComplete(r, leg)}
+                      onClick={() => uncompleteLeg(r, leg)}
                     >
                       ✓ {leg === 'to_work' ? 'To-work' : 'Way-back'} done — undo
                     </button>
@@ -686,6 +993,7 @@ export default function HomePage() {
       </div>
     );
   }
+
   return (
     <div className="wrap">
       <div className="topbar">
@@ -696,7 +1004,7 @@ export default function HomePage() {
         <button className="link" onClick={handleSignOut}>Sign out</button>
       </div>
 
-      {view === 'today' && (
+      {view === 'today' && filterAgent !== 'Team' && (
         <>
           <h1 style={{ marginTop: 16 }}>{editingId ? 'Edit ride' : 'Add a ride'}</h1>
           <div className="sub" style={{ marginBottom: 16 }}>Fill it in, pick the agent last, hit save.</div>
@@ -789,6 +1097,27 @@ export default function HomePage() {
               ))}
             </div>
 
+            <div className="toggle-row">
+              <span>Paid</span>
+              <label className="switch">
+                <input type="checkbox" checked={form.paid} onChange={(e) => updateField('paid', e.target.checked)} />
+                <span className="track"></span>
+              </label>
+            </div>
+
+            <div className="toggle-row">
+              <span>Active on schedule</span>
+              <label className="switch">
+                <input type="checkbox" checked={form.active} onChange={(e) => updateField('active', e.target.checked)} />
+                <span className="track"></span>
+              </label>
+            </div>
+            {!form.active && (
+              <div className="sub" style={{ marginTop: -6, marginBottom: 10 }}>
+                Kept in Customers, hidden from Today and the calendar.
+              </div>
+            )}
+
             <button className="primary" type="submit" disabled={saving}>
               {saving ? 'Saving...' : editingId ? 'Update ride' : 'Save ride'}
             </button>
@@ -803,21 +1132,25 @@ export default function HomePage() {
       )}
 
       <div className="tabs">
-        {AGENTS.map((a) => (
-          <div key={a} className={`tab ${filterAgent === a ? 'active' : ''}`} onClick={() => setFilterAgent(a)}>
+        {[...AGENTS, 'Team'].map((a) => (
+          <div key={a} className={`tab ${filterAgent === a ? 'active' : ''} ${a === 'Team' ? 'team-tab' : ''}`} onClick={() => setFilterAgent(a)}>
             {a}
           </div>
         ))}
       </div>
 
-      <div className="subtabs">
-        {VIEWS.map((v) => (
-          <div key={v} className={`subtab ${view === v ? 'active' : ''}`} onClick={() => setView(v)}>
-            {VIEW_LABELS[v]}
-          </div>
-        ))}
-      </div>
+      {filterAgent !== 'Team' && (
+        <div className="subtabs">
+          {VIEWS.map((v) => (
+            <div key={v} className={`subtab ${view === v ? 'active' : ''}`} onClick={() => setView(v)}>
+              {VIEW_LABELS[v]}
+            </div>
+          ))}
+        </div>
+      )}
 
+      {filterAgent !== 'Team' && (
+        <>
       {view === 'today' && (
         <>
           <div className="list-header">
@@ -858,16 +1191,26 @@ export default function HomePage() {
             <h2>{filterAgent}'s customers</h2>
             <div className="total-pill">{agentRides.length}</div>
           </div>
-          {agentRides.length === 0 ? (
-            <div className="empty">No customers yet for {filterAgent}.</div>
+          <input
+            className="search-box"
+            placeholder="Search by name..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+          />
+          {searchedRides.length === 0 ? (
+            <div className="empty">{searchQuery ? 'No matches.' : `No customers yet for ${filterAgent}.`}</div>
           ) : (
-            agentRides.map((r) => {
+            searchedRides.map((r) => {
               const isExpanded = expandedIds.has(r.id);
               const wa = waLink(r.mobile_number);
+              const call = callLink(r.mobile_number);
               return (
-                <div className="entry" key={r.id}>
+                <div className={`entry ${r.active === false ? 'entry-dimmed' : ''}`} key={r.id}>
                   <div className="entry-top entry-top-clickable" onClick={() => toggleExpand(r.id)}>
-                    <div className="entry-name">{r.name}</div>
+                    <div className="entry-name">
+                      {r.name}
+                      {r.active === false && <span className="paused-tag">Paused</span>}
+                    </div>
                     <div className="entry-top-right">
                       <div className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</div>
                       <span className={`chevron ${isExpanded ? 'open' : ''}`}>▾</span>
@@ -912,6 +1255,11 @@ export default function HomePage() {
                           <button className="copy-btn" onClick={() => copyNumber(r)}>
                             {copiedId === r.id ? 'Copied!' : 'Copy'}
                           </button>
+                          {call && (
+                            <a className="call-btn" href={call}>
+                              Call
+                            </a>
+                          )}
                           {wa && (
                             <a className="wa-btn" href={wa} target="_blank" rel="noopener noreferrer">
                               WhatsApp
@@ -927,6 +1275,13 @@ export default function HomePage() {
                         <button onClick={() => copyDriverMessage(r)}>
                           {driverMsgCopiedId === r.id ? 'Copied!' : 'Driver message'}
                         </button>
+                        <button className={r.paid ? 'paid-toggle-on' : ''} onClick={() => togglePaid(r)}>
+                          {r.paid ? '✓ Paid' : 'Mark paid'}
+                        </button>
+                        <button onClick={() => toggleActive(r)}>
+                          {r.active === false ? 'Reactivate' : 'Pause'}
+                        </button>
+                        <button onClick={() => viewCustomerHistory(r)}>History</button>
                       </div>
                       {copyOpenId === r.id && (
                         <div className="copy-picker">
@@ -944,19 +1299,25 @@ export default function HomePage() {
         </>
       )}
 
-      {view === 'quicklist' && (
+      {view === 'paid' && (
         <>
           <div className="list-header">
-            <h2>{filterAgent}'s quick list</h2>
-            <div className="total-pill">{quickList.length}</div>
+            <h2>{filterAgent}'s paid customers</h2>
+            <div className="total-pill">{agentRides.filter((r) => r.paid).length}</div>
           </div>
-          {quickList.length === 0 ? (
-            <div className="empty">No customers yet for {filterAgent}.</div>
+          {agentRides.filter((r) => r.paid).length === 0 ? (
+            <div className="empty">No customers marked paid yet.</div>
           ) : (
-            quickList.map((r) => (
-              <div className="quicklist-row" key={r.id} onClick={() => startEdit(r)}>
-                <span>{r.name}</span>
-                <span className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</span>
+            agentRides.filter((r) => r.paid).map((r) => (
+              <div className="entry" key={r.id}>
+                <div className="entry-top">
+                  <div className="entry-name">{r.name}</div>
+                  <div className="entry-amount">${(parseFloat(r.amount) || 0).toFixed(2)}</div>
+                </div>
+                <div className="entry-actions">
+                  <button onClick={() => startEdit(r)}>Edit</button>
+                  <button onClick={() => togglePaid(r)}>Mark unpaid</button>
+                </div>
               </div>
             ))
           )}
@@ -1014,30 +1375,156 @@ export default function HomePage() {
         </>
       )}
 
+      {view === 'stats' && (
+        <>
+          <div className="list-header">
+            <h2>{filterAgent}'s earnings</h2>
+          </div>
+          <div className="subtabs">
+            {['today', 'week', 'month'].map((r) => (
+              <div key={r} className={`subtab ${statsRange === r ? 'active' : ''}`} onClick={() => setStatsRange(r)}>
+                {r === 'today' ? 'Today' : r === 'week' ? 'Last 7 days' : 'Last 30 days'}
+              </div>
+            ))}
+          </div>
+
+          {loadingStats ? (
+            <div className="loading">Loading...</div>
+          ) : (
+            <>
+              <div className="earnings-total">${statsTotal.toFixed(2)}</div>
+              <div className="stats-row">
+                <span className="stat-pill">🏢 {statsToWorkCount} to-work</span>
+                <span className="stat-pill">🏠 {statsWayBackCount} way-back</span>
+                <span className="stat-pill">✓ {statsData.length} total legs</span>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
       {view === 'history' && (
         <>
           <div className="list-header">
-            <h2>{filterAgent}'s history</h2>
+            <h2>{historyFilterRide ? `${historyFilterRide.name}'s history` : `${filterAgent}'s history`}</h2>
           </div>
+          {historyFilterRide && (
+            <div className="filter-banner">
+              <span>Showing only {historyFilterRide.name}</span>
+              <button onClick={clearHistoryFilter}>Show everyone</button>
+            </div>
+          )}
           {loadingHistory ? (
             <div className="loading">Loading...</div>
           ) : history.length === 0 ? (
             <div className="empty">No completed trips logged yet.</div>
           ) : (
-            history.map((h) => (
-              <div className="history-row" key={h.id}>
-                <div>
-                  <div className="entry-name">{h.customer_name}</div>
-                  <div className="sub" style={{ marginTop: 2 }}>
-                    {h.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(h.completed_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })}
+            groupHistoryByDay(history).map(([day, entries]) => {
+              const dayTotal = entries.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+              return (
+                <div key={day} className="history-day-group">
+                  <div className="history-day-header">
+                    <span>{formatHistoryDayLabel(day, businessDay)}</span>
+                    <span>${dayTotal.toFixed(2)}</span>
+                  </div>
+                  {entries.map((h) => {
+                    const needsAmounts = h.money_out == null || h.cost == null;
+                    return (
+                      <div className="history-row-wrap" key={h.id}>
+                        <div className="history-row">
+                          <div>
+                            <div className="entry-name">{h.customer_name}</div>
+                            <div className="sub" style={{ marginTop: 2 }}>
+                              {h.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(h.completed_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+                            </div>
+                          </div>
+                          <div className="entry-amount">${(parseFloat(h.amount) || 0).toFixed(2)}</div>
+                        </div>
+
+                        {editingHistoryId === h.id ? (
+                          <div className="complete-form">
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Ride cost"
+                              value={historyEditInputs.ride_cost}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, ride_cost: e.target.value }))} />
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Tip"
+                              value={historyEditInputs.tip}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, tip: e.target.value }))} />
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Money out"
+                              value={historyEditInputs.money_out}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, money_out: e.target.value }))} />
+                            <input type="number" step="0.01" inputMode="decimal" placeholder="Cost"
+                              value={historyEditInputs.cost}
+                              onChange={(e) => setHistoryEditInputs((c) => ({ ...c, cost: e.target.value }))} />
+                            <div className="complete-form-actions">
+                              <button className="complete-form-confirm" onClick={() => saveHistoryEdit(h.id)}>Save</button>
+                              <button className="complete-form-cancel" onClick={cancelEditingHistory}>Cancel</button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="history-amounts">
+                            <span>Ride cost: {h.ride_cost != null ? `$${parseFloat(h.ride_cost).toFixed(2)}` : '—'}</span>
+                            <span>Tip: {h.tip != null ? `$${parseFloat(h.tip).toFixed(2)}` : '—'}</span>
+                            <span>Money out: {h.money_out != null ? `$${parseFloat(h.money_out).toFixed(2)}` : '—'}</span>
+                            <span>Cost: {h.cost != null ? `$${parseFloat(h.cost).toFixed(2)}` : '—'}</span>
+                            <button className={needsAmounts ? 'needs-amounts' : ''} onClick={() => startEditingHistory(h)}>
+                              {needsAmounts ? 'Add amounts' : 'Edit amounts'}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })
+          )}
+        </>
+      )}
+        </>
+      )}
+
+      {filterAgent === 'Team' && (
+        <>
+          <div className="list-header">
+            <h2>Team overview — today</h2>
+          </div>
+
+          <div className="stats-row">
+            <span className="stat-pill">👥 {rides.filter((r) => AGENTS.includes(r.agent) && r.active !== false).length} active customers</span>
+            <span className="stat-pill">✓ {teamStats.length} legs completed today</span>
+          </div>
+
+          {loadingTeamStats ? (
+            <div className="loading">Loading...</div>
+          ) : (
+            [
+              { key: 'morning', label: 'Morning · 6am–2pm' },
+              { key: 'evening', label: 'Evening · 2pm–8pm' },
+              { key: 'night', label: 'Night · 8pm–1am' },
+              { key: 'other', label: 'Other hours (1am–6am)' },
+            ].map(({ key, label }) => {
+              const bucket = teamStats.filter((h) => phaseForHour(new Date(h.completed_at).getHours()) === key);
+              if (key === 'other' && bucket.length === 0) return null;
+              const total = bucket.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+              const tips = bucket.reduce((s, h) => s + (parseFloat(h.tip) || 0), 0);
+              return (
+                <div key={key} className="phase-card">
+                  <div className="phase-header">
+                    <span>{label}</span>
+                    <span className="total-pill">{bucket.length} legs</span>
+                  </div>
+                  <div className="stats-row">
+                    <span className="stat-pill">💵 ${total.toFixed(2)} collected</span>
+                    <span className="stat-pill">💰 ${tips.toFixed(2)} tips</span>
                   </div>
                 </div>
-                <div className="entry-amount">${(parseFloat(h.amount) || 0).toFixed(2)}</div>
-              </div>
-            ))
+              );
+            })
           )}
         </>
       )}
     </div>
   );
 }
+
+
