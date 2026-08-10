@@ -29,6 +29,8 @@ const emptyForm = {
   days_of_week: [0, 1, 2, 3, 4, 5, 6],
   paid: false,
   active: true,
+  is_one_time: false,
+  one_time_date: '',
 };
 
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
@@ -121,20 +123,14 @@ function sortKey(ride, now, businessDay) {
   return [0, Math.min(...pending.map((l) => minutesUntil(l.time, now)))];
 }
 
-function groupHistoryByCustomer(history) {
+function groupHistoryByDay(history) {
   const groups = {};
   history.forEach((h) => {
-    const name = h.customer_name || 'Unknown';
-    if (!groups[name]) groups[name] = [];
-    groups[name].push(h);
+    const day = h.business_day;
+    if (!groups[day]) groups[day] = [];
+    groups[day].push(h);
   });
-  // history arrives ordered by completed_at desc, so each group's first entry
-  // is already its most recent — sort customers by that, most recent first.
-  return Object.entries(groups).sort((a, b) => {
-    const aLatest = new Date(a[1][0].completed_at).getTime();
-    const bLatest = new Date(b[1][0].completed_at).getTime();
-    return bLatest - aLatest;
-  });
+  return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
 }
 
 // Buckets an hour into the 3 requested shifts. Anything from 1am-6am (outside
@@ -144,6 +140,23 @@ function phaseForHour(hour) {
   if (hour >= 14 && hour < 20) return 'evening';
   if (hour >= 20 || hour < 1) return 'night';
   return 'other';
+}
+
+// Sums trip_history amounts without double-counting a round trip: each leg
+// logs the full ride price (not split), so a customer with both legs
+// completed the same day would otherwise count twice. This counts each
+// ride, once per day, toward the total — regardless of how many legs.
+function sumDistinctRideDay(entries) {
+  const seen = new Set();
+  let total = 0;
+  entries.forEach((h) => {
+    const key = `${h.ride_id}-${h.business_day}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      total += parseFloat(h.amount) || 0;
+    }
+  });
+  return total;
 }
 
 function formatHistoryDayLabel(dayStr, todayBusinessDay) {
@@ -160,10 +173,11 @@ function formatHistoryDayLabel(dayStr, todayBusinessDay) {
   });
 }
 
-function ridesScheduledOnWeekday(rides, weekdayIdx) {
+function ridesScheduledOnWeekday(rides, weekdayIdx, dateStr) {
   return rides.filter((r) => {
     if (r.active === false) return false;
     if (activeLegs(r).length === 0) return false;
+    if (r.one_time_date) return dateStr != null && r.one_time_date === dateStr;
     if (!r.days_of_week || r.days_of_week.length === 0) return true;
     return r.days_of_week.includes(weekdayIdx);
   });
@@ -245,7 +259,7 @@ export default function HomePage() {
   const [editingHistoryId, setEditingHistoryId] = useState(null);
   const [historyEditInputs, setHistoryEditInputs] = useState({ ride_cost: '', tip: '', money_out: '', cost: '' });
   const [historyFilterRide, setHistoryFilterRide] = useState(null);
-  const [selectedHistoryCustomer, setSelectedHistoryCustomer] = useState(null);
+  const [selectedHistoryDay, setSelectedHistoryDay] = useState(null);
   const [teamStats, setTeamStats] = useState([]);
   const [loadingTeamStats, setLoadingTeamStats] = useState(false);
   const [todaysHistory, setTodaysHistory] = useState([]);
@@ -288,7 +302,8 @@ export default function HomePage() {
   // lookups every time you switch agents.
   useEffect(() => {
     const bWeekday = businessWeekday(new Date());
-    const relevant = ridesScheduledOnWeekday(rides.filter((r) => r.agent === filterAgent), bWeekday);
+    const bDayStr = businessDayStr(new Date());
+    const relevant = ridesScheduledOnWeekday(rides.filter((r) => r.agent === filterAgent), bWeekday, bDayStr);
     relevant.forEach((r) => {
       ['to_work', 'way_back'].forEach((leg) => {
         const enabled = leg === 'to_work' ? r.to_work_enabled !== false : r.way_back_enabled !== false;
@@ -333,7 +348,7 @@ export default function HomePage() {
   }, [session, filterAgent, historyFilterRide]);
 
   useEffect(() => {
-    setSelectedHistoryCustomer(null);
+    setSelectedHistoryDay(null);
   }, [filterAgent]);
 
   useEffect(() => {
@@ -425,6 +440,8 @@ export default function HomePage() {
       days_of_week: ride.days_of_week && ride.days_of_week.length ? ride.days_of_week : [0, 1, 2, 3, 4, 5, 6],
       paid: !!ride.paid,
       active: ride.active !== false,
+      is_one_time: !!ride.one_time_date,
+      one_time_date: ride.one_time_date || '',
     });
     setEditingId(ride.id);
     setView('today');
@@ -440,6 +457,10 @@ export default function HomePage() {
     }
     if (!form.to_work_enabled && !form.way_back_enabled) {
       setError('Turn on at least one trip — to-work or way-back.');
+      return;
+    }
+    if (form.is_one_time && !form.one_time_date) {
+      setError('Pick a date for the one-time ride.');
       return;
     }
     setSaving(true);
@@ -463,6 +484,7 @@ export default function HomePage() {
       days_of_week: form.days_of_week,
       paid: form.paid,
       active: form.active,
+      one_time_date: form.is_one_time ? form.one_time_date : null,
     };
 
     // If an address changed, its cached coordinates are now wrong — clear them so
@@ -548,12 +570,12 @@ export default function HomePage() {
       }
 
       const toNumOrNull = (v) => (v === '' ? null : parseFloat(v) || 0);
-      // The price on the ride is the full round-trip price, not per leg — so if
-      // both legs are active, split it evenly between them. Completing both
-      // still adds up to the right total instead of counting the full price twice.
-      const legCount = activeLegs(ride).length;
+      // The price shown on each completed leg is the full ride price (not split)
+      // — but wherever totals are summed (History, Earnings, Team), they're
+      // deduped per ride-per-day via sumDistinctRideDay() so a round-trip
+      // customer's price doesn't get counted twice just because both legs
+      // were completed.
       const fullAmount = parseFloat(ride.amount) || 0;
-      const legAmount = legCount > 1 ? fullAmount / 2 : fullAmount;
 
       await supabase.from('trip_history').insert({
         user_id: session.user.id,
@@ -561,7 +583,7 @@ export default function HomePage() {
         agent: ride.agent,
         customer_name: ride.name,
         leg,
-        amount: legAmount,
+        amount: fullAmount,
         ride_cost: toNumOrNull(completionInputs.ride_cost),
         tip: toNumOrNull(completionInputs.tip),
         money_out: toNumOrNull(completionInputs.money_out),
@@ -610,13 +632,13 @@ export default function HomePage() {
 
   function viewCustomerHistory(ride) {
     setHistoryFilterRide(ride);
-    setSelectedHistoryCustomer(null);
+    setSelectedHistoryDay(null);
     setView('history');
   }
 
   function clearHistoryFilter() {
     setHistoryFilterRide(null);
-    setSelectedHistoryCustomer(null);
+    setSelectedHistoryDay(null);
   }
 
   function startEditingHistory(entry) {
@@ -839,7 +861,7 @@ export default function HomePage() {
   const searchedRides = searchQuery.trim()
     ? agentRides.filter((r) => r.name.toLowerCase().includes(searchQuery.trim().toLowerCase()))
     : agentRides;
-  const todaysRides = ridesScheduledOnWeekday(agentRides, todayWeekday);
+  const todaysRides = ridesScheduledOnWeekday(agentRides, todayWeekday, businessDay);
   const pendingToday = todaysRides.filter((r) => !isFullyComplete(r, businessDay));
   const completedToday = todaysRides.filter((r) => isFullyComplete(r, businessDay));
 
@@ -855,7 +877,7 @@ export default function HomePage() {
   const firstPendingId = sortedPending[0]?.id;
   const nextUpMinutes = sortedPending.length > 0 ? sortKey(sortedPending[0], now, businessDay)[1] : null;
 
-  const statsTotal = statsData.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+  const statsTotal = sumDistinctRideDay(statsData);
   const statsToWorkCount = statsData.filter((h) => h.leg === 'to_work').length;
   const statsWayBackCount = statsData.filter((h) => h.leg === 'way_back').length;
 
@@ -1001,10 +1023,10 @@ export default function HomePage() {
               const isCompleting = completingKey === legKey;
               return (
                 <div key={leg}>
-                  <div className="trip-line">
+                  <div className={`trip-line trip-line-${tagClass}`}>
                     <span className={`trip-tag ${tagClass}`}>{tagLabel}</span>
                     <span className="trip-time">{fmtTime(info.time)}</span>
-                    <span>{renderLocation(info.pickup)} → {renderLocation(info.dest)}</span>
+                    <span className="trip-route">{renderLocation(info.pickup)} <span className="trip-arrow">→</span> {renderLocation(info.dest)}</span>
                   </div>
                   {!opts.dimmed && isCompleting && (
                     <div className="complete-form">
@@ -1230,14 +1252,34 @@ export default function HomePage() {
               {AGENTS.map((a) => <option key={a} value={a}>{a}</option>)}
             </select>
 
-            <label>Which days does this ride happen?</label>
-            <div className="day-chips">
-              {DAY_LABELS.map((label, idx) => (
-                <div key={idx} className={`day-chip ${form.days_of_week.includes(idx) ? 'active' : ''}`} onClick={() => toggleDay(idx)}>
-                  {label}
-                </div>
-              ))}
+            <div className="toggle-row">
+              <span>One-time ride</span>
+              <label className="switch">
+                <input type="checkbox" checked={form.is_one_time} onChange={(e) => updateField('is_one_time', e.target.checked)} />
+                <span className="track"></span>
+              </label>
             </div>
+
+            {form.is_one_time ? (
+              <>
+                <label>Which date?</label>
+                <input type="date" value={form.one_time_date} onChange={(e) => updateField('one_time_date', e.target.value)} />
+                <div className="sub" style={{ marginTop: 6, marginBottom: 4 }}>
+                  Only shows up on this one date — not recurring.
+                </div>
+              </>
+            ) : (
+              <>
+                <label>Which days does this ride happen?</label>
+                <div className="day-chips">
+                  {DAY_LABELS.map((label, idx) => (
+                    <div key={idx} className={`day-chip ${form.days_of_week.includes(idx) ? 'active' : ''}`} onClick={() => toggleDay(idx)}>
+                      {label}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
 
             <div className="toggle-row">
               <span>Paid</span>
@@ -1383,13 +1425,19 @@ export default function HomePage() {
 
                   {isExpanded && (
                     <>
-                      <div className="day-chips" style={{ marginTop: 10 }}>
-                        {DAY_LABELS.map((label, idx) => (
-                          <div key={idx} className={`day-chip mini ${(!r.days_of_week || r.days_of_week.length === 0 || r.days_of_week.includes(idx)) ? 'active' : ''}`}>
-                            {label}
-                          </div>
-                        ))}
-                      </div>
+                      {r.one_time_date ? (
+                        <div className="one-time-tag" style={{ marginTop: 10 }}>
+                          📅 One-time — {new Date(r.one_time_date + 'T00:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                        </div>
+                      ) : (
+                        <div className="day-chips" style={{ marginTop: 10 }}>
+                          {DAY_LABELS.map((label, idx) => (
+                            <div key={idx} className={`day-chip mini ${(!r.days_of_week || r.days_of_week.length === 0 || r.days_of_week.includes(idx)) ? 'active' : ''}`}>
+                              {label}
+                            </div>
+                          ))}
+                        </div>
+                      )}
 
                       {r.mobile_number && (
                         <div className="copy-row">
@@ -1484,7 +1532,7 @@ export default function HomePage() {
               const dayNum = i + 1;
               const cellDate = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), dayNum);
               const weekday = cellDate.getDay();
-              const count = ridesScheduledOnWeekday(agentRides, weekday).length;
+              const count = ridesScheduledOnWeekday(agentRides, weekday, localDateStr(cellDate)).length;
               const isToday = localDateStr(cellDate) === businessDay;
               return (
                 <div
@@ -1551,7 +1599,7 @@ export default function HomePage() {
           <div className="list-header">
             <h2>
               {historyFilterRide ? `${historyFilterRide.name}'s history`
-                : selectedHistoryCustomer ? `${selectedHistoryCustomer}'s history`
+                : selectedHistoryDay ? formatHistoryDayLabel(selectedHistoryDay, businessDay)
                 : `${filterAgent}'s history`}
             </h2>
           </div>
@@ -1561,10 +1609,10 @@ export default function HomePage() {
               <button onClick={clearHistoryFilter}>Show everyone</button>
             </div>
           )}
-          {!historyFilterRide && selectedHistoryCustomer && (
+          {!historyFilterRide && selectedHistoryDay && (
             <div className="filter-banner">
-              <span>Showing only {selectedHistoryCustomer}</span>
-              <button onClick={() => setSelectedHistoryCustomer(null)}>← All customers</button>
+              <span>{formatHistoryDayLabel(selectedHistoryDay, businessDay)}</span>
+              <button onClick={() => setSelectedHistoryDay(null)}>← All dates</button>
             </div>
           )}
 
@@ -1575,18 +1623,18 @@ export default function HomePage() {
           ) : historyFilterRide ? (
             // Already filtered to one specific ride's history (from a customer's "History" button).
             history.map((h) => renderHistoryEntry(h))
-          ) : selectedHistoryCustomer ? (
-            // Drilled into one customer from the grid below.
-            history.filter((h) => (h.customer_name || 'Unknown') === selectedHistoryCustomer).map((h) => renderHistoryEntry(h))
+          ) : selectedHistoryDay ? (
+            // Drilled into one date from the grid below.
+            history.filter((h) => h.business_day === selectedHistoryDay).map((h) => renderHistoryEntry(h))
           ) : (
-            // Overview: one compact box per customer, sorted most-recent-first —
+            // Overview: one compact box per day, most recent first —
             // tap a box to drill in, instead of one long scrolling list.
             <div className="customer-grid">
-              {groupHistoryByCustomer(history).map(([customerName, entries]) => {
-                const total = entries.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+              {groupHistoryByDay(history).map(([day, entries]) => {
+                const total = sumDistinctRideDay(entries);
                 return (
-                  <div key={customerName} className="customer-box" onClick={() => setSelectedHistoryCustomer(customerName)}>
-                    <div className="customer-box-name">{customerName}</div>
+                  <div key={day} className="customer-box" onClick={() => setSelectedHistoryDay(day)}>
+                    <div className="customer-box-name">{formatHistoryDayLabel(day, businessDay)}</div>
                     <div className="customer-box-total">${total.toFixed(2)}</div>
                     <div className="customer-box-count">{entries.length} trip{entries.length === 1 ? '' : 's'}</div>
                   </div>
@@ -1621,7 +1669,7 @@ export default function HomePage() {
             ].map(({ key, label }) => {
               const bucket = teamStats.filter((h) => phaseForHour(new Date(h.completed_at).getHours()) === key);
               if (key === 'other' && bucket.length === 0) return null;
-              const total = bucket.reduce((s, h) => s + (parseFloat(h.amount) || 0), 0);
+              const total = sumDistinctRideDay(bucket);
               return (
                 <div key={key} className="phase-card">
                   <div className="phase-header">
