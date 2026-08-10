@@ -191,8 +191,9 @@ button.link {
   padding: 14px;
   margin-bottom: 10px;
   animation: fadeSlideUp 0.3s ease both;
+  box-shadow: 0 2px 8px -4px rgba(0, 0, 0, 0.3);
 }
-.entry.next-up { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+.entry.next-up { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber), 0 4px 16px -4px rgba(255, 138, 76, 0.25); }
 
 .next-up-tag {
   display: inline-flex; align-items: center; gap: 6px;
@@ -205,14 +206,22 @@ button.link {
 }
 
 .entry-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-.entry-name { font-weight: 700; font-size: 15px; }
-.entry-amount { font-weight: 800; font-size: 16px; white-space: nowrap; }
+.entry-name { font-weight: 700; font-size: 15.5px; letter-spacing: -0.01em; }
+.entry-amount { font-weight: 800; font-size: 16px; white-space: nowrap; color: var(--amber); }
 
-.trip-line { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; flex-wrap: wrap; }
+.trip-line {
+  display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px;
+  flex-wrap: wrap; padding: 9px 11px; border-radius: 9px; background: var(--panel-2);
+  border-left: 3px solid var(--line);
+}
+.trip-line-to-work { border-left-color: var(--green); }
+.trip-line-way-back { border-left-color: var(--coral); }
 .trip-tag { font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 5px; text-transform: uppercase; flex-shrink: 0; width: 62px; text-align: center; }
 .trip-tag.to-work { background: var(--green-dim); color: var(--green); }
 .trip-tag.way-back { background: var(--coral-dim); color: var(--coral); }
-.trip-time { color: var(--muted); flex-shrink: 0; }
+.trip-time { color: var(--muted); flex-shrink: 0; font-weight: 600; }
+.trip-route { color: var(--text); }
+.trip-arrow { color: var(--muted); font-weight: 700; }
 .loc-link { color: var(--amber); text-decoration: underline; }
 
 .copy-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; }
@@ -519,3 +528,8 @@ button.link {
 }
 .customer-box-total { font-size: 20px; font-weight: 800; color: var(--amber); }
 .customer-box-count { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+.one-time-tag {
+  display: inline-block; font-size: 12px; font-weight: 700; color: var(--amber);
+  background: var(--amber-dim); border-radius: 8px; padding: 6px 10px;
+}
