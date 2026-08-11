@@ -112,11 +112,29 @@ function isFullyComplete(ride, businessDay) {
   });
 }
 
+// A leg is "resolved" for today if it's either completed or skipped — either
+// way, nothing left to do on it. Skipping doesn't log any money.
+function isLegResolved(ride, leg, businessDay) {
+  const doneField = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
+  const skipField = leg === 'to_work' ? 'to_work_skipped_date' : 'way_back_skipped_date';
+  return ride[doneField] === businessDay || ride[skipField] === businessDay;
+}
+function isResolvedToday(ride, businessDay) {
+  const legs = activeLegs(ride);
+  if (legs.length === 0) return false;
+  return legs.every((leg) => isLegResolved(ride, leg, businessDay));
+}
+function hasAnySkipToday(ride, businessDay) {
+  return activeLegs(ride).some((leg) => {
+    const skipField = leg === 'to_work' ? 'to_work_skipped_date' : 'way_back_skipped_date';
+    return ride[skipField] === businessDay;
+  });
+}
+
 function sortKey(ride, now, businessDay) {
   const legs = activeLegs(ride).map((leg) => {
-    const field = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
     const time = leg === 'to_work' ? ride.to_work_time : ride.way_back_time;
-    return { done: ride[field] === businessDay, time };
+    return { done: isLegResolved(ride, leg, businessDay), time };
   });
   const pending = legs.filter((l) => !l.done);
   if (pending.length === 0) return [1, Infinity];
@@ -262,6 +280,10 @@ export default function HomePage() {
   const [selectedHistoryDay, setSelectedHistoryDay] = useState(null);
   const [teamStats, setTeamStats] = useState([]);
   const [loadingTeamStats, setLoadingTeamStats] = useState(false);
+  const [cliqPayments, setCliqPayments] = useState([]);
+  const [loadingCliq, setLoadingCliq] = useState(false);
+  const [cliqForm, setCliqForm] = useState({ customerChoice: '', customName: '', tripType: 'round_trip', amount: '' });
+  const [cliqTeamTotal, setCliqTeamTotal] = useState(0);
   const [todaysHistory, setTodaysHistory] = useState([]);
 
   useEffect(() => {
@@ -396,6 +418,68 @@ export default function HomePage() {
   useEffect(() => {
     if (session && filterAgent === 'Team') loadTeamStats();
   }, [session, filterAgent, loadTeamStats]);
+
+  // Cliq payments are combined across everyone — not tied to a single agent —
+  // so this loads regardless of which agent tab you're on.
+  const loadCliqPayments = useCallback(async () => {
+    if (!session) return;
+    setLoadingCliq(true);
+    const { data, error } = await supabase
+      .from('cliq_payments')
+      .select('*')
+      .order('paid_at', { ascending: false })
+      .limit(100);
+    if (error) setError(error.message);
+    else setCliqPayments(data || []);
+    setLoadingCliq(false);
+  }, [session]);
+
+  useEffect(() => {
+    if (session && view === 'paid') loadCliqPayments();
+  }, [session, view, loadCliqPayments]);
+
+  const loadCliqTeamTotal = useCallback(async () => {
+    if (!session) return;
+    const bDay = businessDayStr(new Date());
+    const { data, error } = await supabase
+      .from('cliq_payments')
+      .select('amount')
+      .eq('business_day', bDay);
+    if (!error) setCliqTeamTotal((data || []).reduce((s, c) => s + (parseFloat(c.amount) || 0), 0));
+  }, [session]);
+
+  useEffect(() => {
+    if (session && filterAgent === 'Team') loadCliqTeamTotal();
+  }, [session, filterAgent, loadCliqTeamTotal]);
+
+  async function saveCliqPayment() {
+    const name = cliqForm.customerChoice === '__other__' ? cliqForm.customName.trim() : cliqForm.customerChoice;
+    if (!name) {
+      setError('Pick a customer or type a name for the Cliq payment.');
+      return;
+    }
+    const amount = parseFloat(cliqForm.amount) || 0;
+    const bDay = businessDayStr(new Date());
+    const { error } = await supabase.from('cliq_payments').insert({
+      user_id: session.user.id,
+      customer_name: name,
+      trip_type: cliqForm.tripType,
+      amount,
+      business_day: bDay,
+    });
+    if (error) setError(error.message);
+    else {
+      setCliqForm({ customerChoice: '', customName: '', tripType: 'round_trip', amount: '' });
+      loadCliqPayments();
+    }
+  }
+
+  async function deleteCliqPayment(id) {
+    if (!confirm('Delete this Cliq payment?')) return;
+    const { error } = await supabase.from('cliq_payments').delete().eq('id', id);
+    if (error) setError(error.message);
+    else loadCliqPayments();
+  }
 
   async function handleSignOut() {
     await supabase.auth.signOut();
@@ -630,6 +714,21 @@ export default function HomePage() {
     }
   }
 
+  async function skipLeg(ride, leg) {
+    const skipField = leg === 'to_work' ? 'to_work_skipped_date' : 'way_back_skipped_date';
+    const bDay = businessDayStr(new Date());
+    const { error } = await supabase.from('rides').update({ [skipField]: bDay }).eq('id', ride.id);
+    if (error) setError(error.message);
+    else loadRides();
+  }
+
+  async function unskipLeg(ride, leg) {
+    const skipField = leg === 'to_work' ? 'to_work_skipped_date' : 'way_back_skipped_date';
+    const { error } = await supabase.from('rides').update({ [skipField]: null }).eq('id', ride.id);
+    if (error) setError(error.message);
+    else loadRides();
+  }
+
   function viewCustomerHistory(ride) {
     setHistoryFilterRide(ride);
     setSelectedHistoryDay(null);
@@ -858,12 +957,14 @@ export default function HomePage() {
   const dateLabel = now.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
 
   const agentRides = rides.filter((r) => r.agent === filterAgent);
+  const allCustomerNames = [...new Set(rides.filter((r) => AGENTS.includes(r.agent)).map((r) => r.name))].sort((a, b) => a.localeCompare(b));
   const searchedRides = searchQuery.trim()
     ? agentRides.filter((r) => r.name.toLowerCase().includes(searchQuery.trim().toLowerCase()))
     : agentRides;
   const todaysRides = ridesScheduledOnWeekday(agentRides, todayWeekday, businessDay);
-  const pendingToday = todaysRides.filter((r) => !isFullyComplete(r, businessDay));
+  const pendingToday = todaysRides.filter((r) => !isResolvedToday(r, businessDay));
   const completedToday = todaysRides.filter((r) => isFullyComplete(r, businessDay));
+  const skippedToday = todaysRides.filter((r) => isResolvedToday(r, businessDay) && !isFullyComplete(r, businessDay));
 
   const sortedPending = [...pendingToday].sort((a, b) => {
     const [pa, ta] = sortKey(a, now, businessDay);
@@ -890,7 +991,12 @@ export default function HomePage() {
     const pickup = leg === 'to_work' ? ride.to_work_pickup : ride.way_back_pickup;
     const dest = leg === 'to_work' ? ride.to_work_dest : ride.way_back_dest;
     const doneField = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
-    return { enabled, time, pickup, dest, done: ride[doneField] === businessDay };
+    const skipField = leg === 'to_work' ? 'to_work_skipped_date' : 'way_back_skipped_date';
+    return {
+      enabled, time, pickup, dest,
+      done: ride[doneField] === businessDay,
+      skipped: ride[skipField] === businessDay,
+    };
   }
 
   function renderHistoryEntry(h) {
@@ -899,9 +1005,9 @@ export default function HomePage() {
       <div className="history-row-wrap" key={h.id}>
         <div className="history-row">
           <div>
-            <div className="entry-name">{formatHistoryDayLabel(h.business_day, businessDay)}</div>
+            <div className="entry-name">{h.customer_name || 'Unknown'}</div>
             <div className="sub" style={{ marginTop: 2 }}>
-              {h.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(h.completed_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+              {formatHistoryDayLabel(h.business_day, businessDay)} · {h.leg === 'to_work' ? 'To work' : 'Way back'} · {new Date(h.completed_at).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
             </div>
           </div>
           <div className="entry-amount">${(parseFloat(h.amount) || 0).toFixed(2)}</div>
@@ -949,7 +1055,7 @@ export default function HomePage() {
     const call = callLink(r.mobile_number);
     const isOverdue = isNextUp && opts.nextUpMinutes != null && opts.nextUpMinutes < 0;
     return (
-      <div className={`entry ${isNextUp ? 'next-up' : ''} ${isOverdue ? 'overdue' : ''} ${opts.dimmed ? 'entry-dimmed' : ''}`} key={r.id}>
+      <div className={`entry ${isNextUp ? 'next-up' : ''} ${isOverdue ? 'overdue' : ''} ${(opts.dimmed || opts.skippedSection) ? 'entry-dimmed' : ''}`} key={r.id}>
         {isNextUp && (
           <div className={`next-up-tag ${isOverdue ? 'overdue' : ''}`}>
             <span className="pulse-dot"></span>
@@ -1063,23 +1169,34 @@ export default function HomePage() {
                   )}
                   {!opts.dimmed && !isCompleting && (
                     <div className="trip-actions">
-                      <button
-                        className={`complete-btn ${info.done ? 'done' : ''}`}
-                        onClick={() => info.done ? uncompleteLeg(r, leg) : startCompleting(r, leg)}
-                      >
-                        {info.done ? '✓ Completed' : `Mark ${leg === 'to_work' ? 'to-work' : 'way-back'} complete`}
-                      </button>
-                      {canUber(info.pickup) && canUber(info.dest) && (() => {
-                        const uKey = `${r.id}-${leg}`;
-                        const url = uberUrls[uKey];
-                        if (url) {
-                          return <a className="uber-btn" href={url}>🚕 Open in Uber</a>;
-                        }
-                        if (url === null) {
-                          return <span className="uber-btn uber-btn-disabled">Address not found</span>;
-                        }
-                        return <span className="uber-btn uber-btn-disabled">Locating...</span>;
-                      })()}
+                      {info.skipped ? (
+                        <button className="complete-btn skipped" onClick={() => unskipLeg(r, leg)}>
+                          ⏭ Skipped — undo
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className={`complete-btn ${info.done ? 'done' : ''}`}
+                            onClick={() => info.done ? uncompleteLeg(r, leg) : startCompleting(r, leg)}
+                          >
+                            {info.done ? '✓ Completed' : `Mark ${leg === 'to_work' ? 'to-work' : 'way-back'} complete`}
+                          </button>
+                          {!info.done && (
+                            <button className="skip-btn" onClick={() => skipLeg(r, leg)}>Skip today</button>
+                          )}
+                          {canUber(info.pickup) && canUber(info.dest) && (() => {
+                            const uKey = `${r.id}-${leg}`;
+                            const url = uberUrls[uKey];
+                            if (url) {
+                              return <a className="uber-btn" href={url}>🚕 Open in Uber</a>;
+                            }
+                            if (url === null) {
+                              return <span className="uber-btn uber-btn-disabled">Address not found</span>;
+                            }
+                            return <span className="uber-btn uber-btn-disabled">Locating...</span>;
+                          })()}
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1130,6 +1247,41 @@ export default function HomePage() {
                       )}
                     </div>
                   );
+                })}
+              </div>
+            )}
+
+            {opts.skippedSection && (
+              <div className="dimmed-legs">
+                {['to_work', 'way_back'].map((leg) => {
+                  const info = legInfo(r, leg);
+                  if (!info.enabled || !info.time) return null;
+                  if (info.skipped) {
+                    return (
+                      <div key={leg} className="dimmed-leg-block">
+                        <button className="complete-btn skipped" onClick={() => unskipLeg(r, leg)}>
+                          ⏭ {leg === 'to_work' ? 'To-work' : 'Way-back'} skipped — undo
+                        </button>
+                      </div>
+                    );
+                  }
+                  if (info.done) {
+                    const entry = todaysHistory.find((h) => h.ride_id === r.id && h.leg === leg);
+                    return (
+                      <div key={leg} className="dimmed-leg-block">
+                        <button className="complete-btn done" onClick={() => uncompleteLeg(r, leg)}>
+                          ✓ {leg === 'to_work' ? 'To-work' : 'Way-back'} done — undo
+                        </button>
+                        {entry && (
+                          <div className="history-amounts">
+                            <span>Ride cost: {entry.ride_cost != null ? `$${parseFloat(entry.ride_cost).toFixed(2)}` : '—'}</span>
+                            <span>Tip: {entry.tip != null ? `$${parseFloat(entry.tip).toFixed(2)}` : '—'}</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  }
+                  return null;
                 })}
               </div>
             )}
@@ -1366,6 +1518,16 @@ export default function HomePage() {
               {completedToday.map((r) => renderRideCard(r, { dimmed: true }))}
             </>
           )}
+
+          {skippedToday.length > 0 && (
+            <>
+              <div className="list-header">
+                <h2>Skipped today</h2>
+                <div className="total-pill">{skippedToday.length}</div>
+              </div>
+              {skippedToday.map((r) => renderRideCard(r, { skippedSection: true }))}
+            </>
+          )}
         </>
       )}
 
@@ -1491,6 +1653,63 @@ export default function HomePage() {
 
       {view === 'paid' && (
         <>
+          <div className="list-header">
+            <h2>Cliq payments <span className="history-count">(everyone)</span></h2>
+          </div>
+          <div className="complete-form">
+            <select
+              value={cliqForm.customerChoice}
+              onChange={(e) => setCliqForm((c) => ({ ...c, customerChoice: e.target.value }))}
+            >
+              <option value="">Pick a customer...</option>
+              {allCustomerNames.map((n) => <option key={n} value={n}>{n}</option>)}
+              <option value="__other__">Other — type a name</option>
+            </select>
+            {cliqForm.customerChoice === '__other__' && (
+              <input
+                placeholder="Customer name"
+                value={cliqForm.customName}
+                onChange={(e) => setCliqForm((c) => ({ ...c, customName: e.target.value }))}
+              />
+            )}
+            <select
+              value={cliqForm.tripType}
+              onChange={(e) => setCliqForm((c) => ({ ...c, tripType: e.target.value }))}
+            >
+              <option value="one_way">One way</option>
+              <option value="round_trip">Round trip (2 ways)</option>
+            </select>
+            <input
+              type="number" step="0.01" inputMode="decimal" placeholder="Amount"
+              value={cliqForm.amount}
+              onChange={(e) => setCliqForm((c) => ({ ...c, amount: e.target.value }))}
+            />
+            <div className="complete-form-actions">
+              <button className="complete-form-confirm" onClick={saveCliqPayment}>Log Cliq payment</button>
+            </div>
+          </div>
+
+          {loadingCliq ? (
+            <div className="loading">Loading...</div>
+          ) : cliqPayments.length === 0 ? (
+            <div className="empty">No Cliq payments logged yet.</div>
+          ) : (
+            cliqPayments.map((c) => (
+              <div className="history-row" key={c.id}>
+                <div>
+                  <div className="entry-name">{c.customer_name}</div>
+                  <div className="sub" style={{ marginTop: 2 }}>
+                    {c.trip_type === 'one_way' ? 'One way' : 'Round trip'} · {new Date(c.paid_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <div className="entry-amount">${(parseFloat(c.amount) || 0).toFixed(2)}</div>
+                  <button onClick={() => deleteCliqPayment(c.id)}>Delete</button>
+                </div>
+              </div>
+            ))
+          )}
+
           <div className="list-header">
             <h2>{filterAgent}'s paid customers</h2>
             <div className="total-pill">{agentRides.filter((r) => r.paid).length}</div>
@@ -1656,6 +1875,7 @@ export default function HomePage() {
           <div className="stats-row">
             <span className="stat-pill">👥 {rides.filter((r) => AGENTS.includes(r.agent) && r.active !== false).length} active customers</span>
             <span className="stat-pill">✓ {teamStats.length} legs completed today</span>
+            <span className="stat-pill">💳 ${cliqTeamTotal.toFixed(2)} via Cliq today</span>
           </div>
 
           {loadingTeamStats ? (
