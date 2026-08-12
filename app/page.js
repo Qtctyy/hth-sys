@@ -3,12 +3,13 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../lib/supabaseClient';
+import * as XLSX from 'xlsx';
 
 const AGENTS = ['Hamzah', 'Talal'];
 const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const VIEWS = ['today', 'customers', 'paid', 'calendar', 'stats', 'history'];
-const VIEW_LABELS = { today: 'Today', customers: 'Customers', paid: 'Paid', calendar: 'Calendar', stats: 'Earnings', history: 'History' };
+const VIEWS = ['today', 'schedule', 'customers', 'paid', 'calendar', 'stats', 'history'];
+const VIEW_LABELS = { today: 'Today', schedule: 'Schedule', customers: 'Customers', paid: 'Paid', calendar: 'Calendar', stats: 'Earnings', history: 'History' };
 
 const emptyForm = {
   name: '',
@@ -89,6 +90,18 @@ function businessMinutes(hours, minutes) {
   let total = hours * 60 + minutes;
   if (hours < RESET_HOUR) total += 24 * 60;
   return total;
+}
+
+function timeStrToBusinessMinutes(t) {
+  const [h, m] = t.split(':').map(Number);
+  return businessMinutes(h, m);
+}
+
+function hourLabel(timeStr) {
+  const [h] = timeStr.split(':').map(Number);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12} ${ampm}`;
 }
 
 function minutesUntil(t, now) {
@@ -479,6 +492,62 @@ export default function HomePage() {
     const { error } = await supabase.from('cliq_payments').delete().eq('id', id);
     if (error) setError(error.message);
     else loadCliqPayments();
+  }
+
+  // Generates a fresh Excel file from whatever's currently in the database —
+  // not a cached/stale export. Sheet 1: Name, amount, general area, one-way
+  // vs round trip, sorted by to-work time. Sheet 2: today's hour-by-hour
+  // schedule, same data the site's Schedule tab shows.
+  function exportExcel() {
+    const allRides = rides.filter((r) => AGENTS.includes(r.agent));
+    const sorted = [...allRides].sort((a, b) => {
+      const ta = a.to_work_time || '99:99';
+      const tb = b.to_work_time || '99:99';
+      return ta.localeCompare(tb);
+    });
+
+    const rows = sorted.map((r) => {
+      const rawArea = (r.to_work_dest && !isUrl(r.to_work_dest)) ? r.to_work_dest
+        : (r.to_work_pickup && !isUrl(r.to_work_pickup)) ? r.to_work_pickup
+        : '';
+      const isRoundTrip = r.to_work_enabled !== false && r.way_back_enabled !== false;
+      return {
+        Name: r.name,
+        Amount: parseFloat(r.amount) || 0,
+        Area: rawArea,
+        Trip: isRoundTrip ? 'Round trip' : 'One way',
+      };
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [{ wch: 22 }, { wch: 10 }, { wch: 26 }, { wch: 12 }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+
+    const now = new Date();
+    const bDay = businessDayStr(now);
+    const bWeekday = businessWeekday(now);
+    const todays = ridesScheduledOnWeekday(allRides, bWeekday, bDay);
+    const scheduleRows = [];
+    todays.forEach((r) => {
+      ['to_work', 'way_back'].forEach((leg) => {
+        const enabled = leg === 'to_work' ? r.to_work_enabled !== false : r.way_back_enabled !== false;
+        const time = leg === 'to_work' ? r.to_work_time : r.way_back_time;
+        if (enabled && time) {
+          scheduleRows.push({
+            Time: fmtTime(time), Name: r.name, Trip: leg === 'to_work' ? 'To work' : 'Way back',
+            _sort: timeStrToBusinessMinutes(time),
+          });
+        }
+      });
+    });
+    scheduleRows.sort((a, b) => a._sort - b._sort);
+    scheduleRows.forEach((r) => delete r._sort);
+    const ws2 = XLSX.utils.json_to_sheet(scheduleRows);
+    ws2['!cols'] = [{ wch: 10 }, { wch: 22 }, { wch: 12 }];
+    XLSX.utils.book_append_sheet(wb, ws2, 'Today Schedule');
+
+    XLSX.writeFile(wb, `customers-${bDay}.xlsx`);
   }
 
   async function handleSignOut() {
@@ -966,6 +1035,24 @@ export default function HomePage() {
   const completedToday = todaysRides.filter((r) => isFullyComplete(r, businessDay));
   const skippedToday = todaysRides.filter((r) => isResolvedToday(r, businessDay) && !isFullyComplete(r, businessDay));
 
+  const timelineEntries = [];
+  todaysRides.forEach((r) => {
+    ['to_work', 'way_back'].forEach((leg) => {
+      const info = legInfo(r, leg);
+      if (info.enabled && info.time) {
+        timelineEntries.push({ time: info.time, name: r.name, leg, ride: r });
+      }
+    });
+  });
+  timelineEntries.sort((a, b) => timeStrToBusinessMinutes(a.time) - timeStrToBusinessMinutes(b.time));
+  const timelineGroups = [];
+  timelineEntries.forEach((e) => {
+    const label = hourLabel(e.time);
+    const last = timelineGroups[timelineGroups.length - 1];
+    if (last && last.label === label) last.items.push(e);
+    else timelineGroups.push({ label, items: [e] });
+  });
+
   const sortedPending = [...pendingToday].sort((a, b) => {
     const [pa, ta] = sortKey(a, now, businessDay);
     const [pb, tb] = sortKey(b, now, businessDay);
@@ -1317,7 +1404,10 @@ export default function HomePage() {
           <div className="eyebrow">Ride Log</div>
           <div className="date-bar">{dateLabel}</div>
         </div>
-        <button className="link" onClick={handleSignOut}>Sign out</button>
+        <div className="topbar-actions">
+          <button className="link" onClick={exportExcel}>Export Excel</button>
+          <button className="link" onClick={handleSignOut}>Sign out</button>
+        </div>
       </div>
 
       {view === 'today' && filterAgent !== 'Team' && (
@@ -1527,6 +1617,33 @@ export default function HomePage() {
               </div>
               {skippedToday.map((r) => renderRideCard(r, { skippedSection: true }))}
             </>
+          )}
+        </>
+      )}
+
+      {view === 'schedule' && (
+        <>
+          <div className="list-header">
+            <h2>{filterAgent}'s schedule today</h2>
+            <div className="total-pill">{timelineEntries.length}</div>
+          </div>
+          {timelineEntries.length === 0 ? (
+            <div className="empty">Nothing scheduled today for {filterAgent}.</div>
+          ) : (
+            timelineGroups.map((group) => (
+              <div key={group.label} className="history-day-group">
+                <div className="history-day-header">
+                  <span>{group.label}</span>
+                  <span>{group.items.length}</span>
+                </div>
+                {group.items.map((e, i) => (
+                  <div className="quicklist-row" key={i} onClick={() => startEdit(e.ride)}>
+                    <span>{e.leg === 'to_work' ? '🏢' : '🏠'} {e.name}</span>
+                    <span className="entry-amount">{fmtTime(e.time)}</span>
+                  </div>
+                ))}
+              </div>
+            ))
           )}
         </>
       )}
