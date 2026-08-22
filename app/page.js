@@ -8,8 +8,8 @@ import * as XLSX from 'xlsx';
 const AGENTS = ['Hamzah', 'Talal'];
 const DAY_LABELS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-const VIEWS = ['today', 'schedule', 'customers', 'paid', 'calendar', 'stats', 'history'];
-const VIEW_LABELS = { today: 'Today', schedule: 'Schedule', customers: 'Customers', paid: 'Paid', calendar: 'Calendar', stats: 'Earnings', history: 'History' };
+const VIEWS = ['today', 'dispatch', 'schedule', 'customers', 'paid', 'calendar', 'stats', 'history'];
+const VIEW_LABELS = { today: 'Today', dispatch: 'Dispatch', schedule: 'Schedule', customers: 'Customers', paid: 'Paid', calendar: 'Calendar', stats: 'Earnings', history: 'History' };
 
 const emptyForm = {
   name: '',
@@ -37,9 +37,6 @@ const emptyForm = {
 function pad(n) { return n < 10 ? '0' + n : '' + n; }
 function localDateStr(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
-// The business day only rolls over at RESET_HOUR local time, not at midnight —
-// so a ride completed at 12:30am still counts as last night's ride until the
-// reset. This uses local time components (not toISOString, which is UTC).
 const RESET_HOUR = 1;
 
 function businessDayStr(d) {
@@ -82,10 +79,6 @@ function fmtTime(t) {
   return `${h12}:${m} ${ampm}`;
 }
 
-// Maps a wall-clock time onto a continuous scale where the business day starts
-// at RESET_HOUR — so 23:50 and 00:10 stay in the right order relative to each
-// other, and a ride whose time has already passed today shows as genuinely
-// overdue (negative) instead of wrapping around to "23 hours from now."
 function businessMinutes(hours, minutes) {
   let total = hours * 60 + minutes;
   if (hours < RESET_HOUR) total += 24 * 60;
@@ -125,8 +118,6 @@ function isFullyComplete(ride, businessDay) {
   });
 }
 
-// A leg is "resolved" for today if it's either completed or skipped — either
-// way, nothing left to do on it. Skipping doesn't log any money.
 function isLegResolved(ride, leg, businessDay) {
   const doneField = leg === 'to_work' ? 'to_work_completed_date' : 'way_back_completed_date';
   const skipField = leg === 'to_work' ? 'to_work_skipped_date' : 'way_back_skipped_date';
@@ -164,8 +155,6 @@ function groupHistoryByDay(history) {
   return Object.entries(groups).sort((a, b) => b[0].localeCompare(a[0]));
 }
 
-// Buckets an hour into the 3 requested shifts. Anything from 1am-6am (outside
-// all three) falls into "other" so nothing silently gets dropped from stats.
 function phaseForHour(hour) {
   if (hour >= 6 && hour < 14) return 'morning';
   if (hour >= 14 && hour < 20) return 'evening';
@@ -173,10 +162,6 @@ function phaseForHour(hour) {
   return 'other';
 }
 
-// Sums trip_history amounts without double-counting a round trip: each leg
-// logs the full ride price (not split), so a customer with both legs
-// completed the same day would otherwise count twice. This counts each
-// ride, once per day, toward the total — regardless of how many legs.
 function sumDistinctRideDay(entries) {
   const seen = new Set();
   let total = 0;
@@ -214,8 +199,6 @@ function ridesScheduledOnWeekday(rides, weekdayIdx, dateStr) {
   });
 }
 
-// Converts a locally-written number (e.g. 07XXXXXXXX) into the international
-// digits-only format WhatsApp's click-to-chat links require.
 function toWhatsappNumber(mobile) {
   if (!mobile) return null;
   let digits = mobile.replace(/\D/g, '');
@@ -298,6 +281,7 @@ export default function HomePage() {
   const [cliqForm, setCliqForm] = useState({ customerChoice: '', customName: '', tripType: 'round_trip', amount: '' });
   const [cliqTeamTotal, setCliqTeamTotal] = useState(0);
   const [todaysHistory, setTodaysHistory] = useState([]);
+  const [dispatchCopiedKey, setDispatchCopiedKey] = useState(null);
 
   useEffect(() => {
     const id = setInterval(() => setTick((t) => t + 1), 30000);
@@ -331,10 +315,6 @@ export default function HomePage() {
     if (session) loadRides();
   }, [session, loadRides]);
 
-  // Pre-resolves Uber links for today's scheduled rides only (not the whole
-  // customer roster — Customers/Quick list/Calendar resolve lazily on expand
-  // instead, see toggleExpand). Keeps this from firing dozens of unnecessary
-  // lookups every time you switch agents.
   useEffect(() => {
     const bWeekday = businessWeekday(new Date());
     const bDayStr = businessDayStr(new Date());
@@ -432,8 +412,6 @@ export default function HomePage() {
     if (session && filterAgent === 'Team') loadTeamStats();
   }, [session, filterAgent, loadTeamStats]);
 
-  // Cliq payments are combined across everyone — not tied to a single agent —
-  // so this loads regardless of which agent tab you're on.
   const loadCliqPayments = useCallback(async () => {
     if (!session) return;
     setLoadingCliq(true);
@@ -494,10 +472,6 @@ export default function HomePage() {
     else loadCliqPayments();
   }
 
-  // Generates a fresh Excel file from whatever's currently in the database —
-  // not a cached/stale export. Sheet 1: Name, amount, general area, one-way
-  // vs round trip, sorted by to-work time. Sheet 2: today's hour-by-hour
-  // schedule, same data the site's Schedule tab shows.
   function exportExcel() {
     const allRides = rides.filter((r) => AGENTS.includes(r.agent));
     const sorted = [...allRides].sort((a, b) => {
@@ -640,8 +614,6 @@ export default function HomePage() {
       one_time_date: form.is_one_time ? form.one_time_date : null,
     };
 
-    // If an address changed, its cached coordinates are now wrong — clear them so
-    // it gets re-resolved instead of quietly sending Uber to the old location.
     const original = editingId ? rides.find((r) => r.id === editingId) : null;
     ['to_work', 'way_back'].forEach((leg) => {
       const pickupField = `${leg}_pickup`;
@@ -657,8 +629,6 @@ export default function HomePage() {
       const { error } = await supabase.from('rides').update(payload).eq('id', editingId);
       saveError = error;
       if (!error) {
-        // Drop any in-memory resolved link for this ride so the (possibly new)
-        // address gets looked up fresh instead of reusing a stale result.
         resolvingUberRef.current.delete(`${editingId}-to_work`);
         resolvingUberRef.current.delete(`${editingId}-way_back`);
         setUberUrls((u) => {
@@ -691,7 +661,6 @@ export default function HomePage() {
     else loadRides();
   }
 
-  // Opens the inline ride-cost/tip form on a leg instead of completing it instantly.
   function startCompleting(ride, leg) {
     setCompletingKey(`${ride.id}-${leg}`);
     setCompletionInputs({ ride_cost: '', tip: '', money_out: '', cost: '' });
@@ -701,9 +670,6 @@ export default function HomePage() {
     setCompletingKey(null);
   }
 
-  // Confirms completion with whatever ride cost/tip were entered. Money out and
-  // cost are left blank here on purpose — those get filled in later (e.g. by
-  // Hamzah) from the History tab, via editHistoryEntry.
   async function confirmComplete(ride, leg) {
     const flightKey = `${ride.id}-${leg}`;
     if (togglingRef.current.has(flightKey)) return;
@@ -723,11 +689,6 @@ export default function HomePage() {
       }
 
       const toNumOrNull = (v) => (v === '' ? null : parseFloat(v) || 0);
-      // The price shown on each completed leg is the full ride price (not split)
-      // — but wherever totals are summed (History, Earnings, Team), they're
-      // deduped per ride-per-day via sumDistinctRideDay() so a round-trip
-      // customer's price doesn't get counted twice just because both legs
-      // were completed.
       const fullAmount = parseFloat(ride.amount) || 0;
 
       await supabase.from('trip_history').insert({
@@ -753,7 +714,6 @@ export default function HomePage() {
     }
   }
 
-  // Undoing a completion doesn't need the cost/tip form — just reverses it.
   async function uncompleteLeg(ride, leg) {
     const flightKey = `${ride.id}-${leg}`;
     if (togglingRef.current.has(flightKey)) return;
@@ -881,10 +841,6 @@ export default function HomePage() {
     }
   }
 
-  // Resolves plain addresses or maps links to coordinates. Full links with
-  // @lat,lng resolve instantly with no network call. Everything else goes
-  // through our own /api/resolve-location route (see that file for why this
-  // has to happen server-side rather than in the browser).
   async function resolveCoord(text) {
     if (!text) return null;
     if (isUrl(text)) {
@@ -905,15 +861,6 @@ export default function HomePage() {
     return coord;
   }
 
-  // Resolves a leg's Uber link in the background, well before the button is tapped.
-  // This is the fix: iOS will only open the Uber app (instead of falling back to the
-  // website) when the link is a real <a href> tapped directly — any lookup done
-  // *after* the tap breaks that trust and Safari loads the web page instead.
-  //
-  // Coordinates are cached permanently on the ride itself (see migration 5) —
-  // once an address is resolved, it's never looked up again on any device,
-  // unless the address text changes (handleSave clears the cache for legs
-  // whose text was edited).
   async function resolveUberUrl(ride, leg) {
     const key = `${ride.id}-${leg}`;
     if (resolvingUberRef.current.has(key) || uberUrls[key] !== undefined) return;
@@ -945,7 +892,6 @@ export default function HomePage() {
         `&pickup[latitude]=${pickupCoord.lat}&pickup[longitude]=${pickupCoord.lon}&pickup[nickname]=${encodeURIComponent(pickupText)}` +
         `&dropoff[latitude]=${destCoord.lat}&dropoff[longitude]=${destCoord.lon}&dropoff[nickname]=${encodeURIComponent(destText)}`;
 
-      // Persist newly-resolved coordinates so this address is never geocoded again.
       const updates = {};
       if (!cachedPickup) { updates[pickupLatField] = pickupCoord.lat; updates[pickupLonField] = pickupCoord.lon; }
       if (!cachedDest) { updates[destLatField] = destCoord.lat; updates[destLonField] = destCoord.lon; }
@@ -964,7 +910,6 @@ export default function HomePage() {
       setCopiedId(ride.id);
       setTimeout(() => setCopiedId(null), 1500);
     } catch (e) {
-      // Clipboard API unavailable — fail silently.
     }
   }
 
@@ -975,8 +920,6 @@ export default function HomePage() {
         next.delete(id);
       } else {
         next.add(id);
-        // Lazily resolve this ride's Uber links only now that it's actually
-        // being looked at — Customers/Quick list aren't pre-resolved eagerly.
         const ride = rides.find((r) => r.id === id);
         if (ride) {
           ['to_work', 'way_back'].forEach((leg) => {
@@ -999,7 +942,30 @@ export default function HomePage() {
       setDriverMsgCopiedId(ride.id);
       setTimeout(() => setDriverMsgCopiedId(null), 1500);
     } catch (e) {
-      // Clipboard API unavailable — fail silently.
+    }
+  }
+
+  // Builds a clean, plain-text summary of one trip leg and copies it to the
+  // clipboard — meant for pasting straight into Uber Central (or anywhere
+  // else) on a PC, since programmatic Uber deep links don't reliably
+  // pre-fill the desktop web booking page the way they do on mobile.
+  async function copyTripDetails(entry) {
+    const info = legInfo(entry.ride, entry.leg);
+    const legLabel = entry.leg === 'to_work' ? 'To work' : 'Way back';
+    const lines = [
+      `Name: ${entry.name}`,
+      entry.ride.mobile_number ? `Phone: ${entry.ride.mobile_number}` : null,
+      `Time: ${fmtTime(entry.time)}`,
+      `Trip: ${legLabel}`,
+      info.pickup && !isUrl(info.pickup) ? `Pickup: ${info.pickup}` : null,
+      info.dest && !isUrl(info.dest) ? `Dropoff: ${info.dest}` : null,
+    ].filter(Boolean).join('\n');
+    try {
+      await navigator.clipboard.writeText(lines);
+      const key = `${entry.ride.id}-${entry.leg}`;
+      setDispatchCopiedKey(key);
+      setTimeout(() => setDispatchCopiedKey(null), 1500);
+    } catch (e) {
     }
   }
 
@@ -1051,6 +1017,11 @@ export default function HomePage() {
     const last = timelineGroups[timelineGroups.length - 1];
     if (last && last.label === label) last.items.push(e);
     else timelineGroups.push({ label, items: [e] });
+  });
+
+  const dispatchEntries = timelineEntries.filter((e) => {
+    const info = legInfo(e.ride, e.leg);
+    return !info.done && !info.skipped;
   });
 
   const sortedPending = [...pendingToday].sort((a, b) => {
@@ -1621,6 +1592,50 @@ export default function HomePage() {
         </>
       )}
 
+      {view === 'dispatch' && (
+        <>
+          <div className="list-header">
+            <h2>{filterAgent}'s dispatch — today</h2>
+            <div className="total-pill">{dispatchEntries.length}</div>
+          </div>
+          <div className="sub" style={{ marginBottom: 14 }}>
+            Built for the PC — Uber's own links don't reliably pre-fill on desktop, so
+            each row copies the trip details to your clipboard instead, ready to paste
+            into Uber Central or wherever you're ordering from.
+          </div>
+          {dispatchEntries.length === 0 ? (
+            <div className="empty">Nothing left to dispatch today for {filterAgent}.</div>
+          ) : (
+            dispatchEntries.map((e, i) => {
+              const info = legInfo(e.ride, e.leg);
+              const wa = waLink(e.ride.mobile_number);
+              const call = callLink(e.ride.mobile_number);
+              const copyKey = `${e.ride.id}-${e.leg}`;
+              return (
+                <div className="entry" key={i}>
+                  <div className="entry-top">
+                    <div className="entry-name">
+                      {fmtTime(e.time)} · {e.leg === 'to_work' ? '🏢 To work' : '🏠 Way back'} · {e.name}
+                    </div>
+                    <div className="entry-amount">${(parseFloat(e.ride.amount) || 0).toFixed(2)}</div>
+                  </div>
+                  <div className={`trip-line trip-line-${e.leg === 'to_work' ? 'to-work' : 'way-back'}`}>
+                    <span className="trip-route">{renderLocation(info.pickup)} <span className="trip-arrow">→</span> {renderLocation(info.dest)}</span>
+                  </div>
+                  <div className="copy-row">
+                    <button className="copy-btn" onClick={() => copyTripDetails(e)}>
+                      {dispatchCopiedKey === copyKey ? 'Copied!' : 'Copy trip details'}
+                    </button>
+                    {call && <a className="call-btn" href={call}>Call</a>}
+                    {wa && <a className="wa-btn" href={wa} target="_blank" rel="noopener noreferrer">WhatsApp</a>}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </>
+      )}
+
       {view === 'schedule' && (
         <>
           <div className="list-header">
@@ -1957,14 +1972,10 @@ export default function HomePage() {
           ) : history.length === 0 ? (
             <div className="empty">No completed trips logged yet.</div>
           ) : historyFilterRide ? (
-            // Already filtered to one specific ride's history (from a customer's "History" button).
             history.map((h) => renderHistoryEntry(h))
           ) : selectedHistoryDay ? (
-            // Drilled into one date from the grid below.
             history.filter((h) => h.business_day === selectedHistoryDay).map((h) => renderHistoryEntry(h))
           ) : (
-            // Overview: one compact box per day, most recent first —
-            // tap a box to drill in, instead of one long scrolling list.
             <div className="customer-grid">
               {groupHistoryByDay(history).map(([day, entries]) => {
                 const total = sumDistinctRideDay(entries);
@@ -2025,5 +2036,3 @@ export default function HomePage() {
     </div>
   );
 }
-
-
